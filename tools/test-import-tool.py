@@ -190,6 +190,78 @@ def main() -> int:
         print("\n[6] 真实服务器交互")
         skip("6.x 真实服务器用例", "未提供 --base/--key")
 
+    # ─────────────────────────────────────────── 7 小白破坏性场景
+    #
+    # 这一组全部是 2026-09-29 五轮实测**真机跑出来**的缺陷，锁定住防止退化。
+    # 每条都对应一个真实发生过的事故或误导性提示。
+    print("\n[7] 小白破坏性场景（实测缺陷回归）")
+
+    # 7.1 地址规范化：大写协议、多余斜杠、路径都要清掉
+    #     事故：`HTTP://1.2.3.4:18610///` 原样显示，请求拼成 `...///admin/...`
+    #           拿到空结果，却报「连接正常」，小白完全查不出来。
+    norm_ok = [("HTTP://1.2.3.4:18610///", "http://1.2.3.4:18610"),
+               ("  http://1.2.3.4:18610/  ", "http://1.2.3.4:18610"),
+               ("1.2.3.4:18610", "http://1.2.3.4:18610"),
+               ("HTTPS://A.COM:443/x?y=1", "https://A.COM:443"),
+               ("http://", "")]
+    for raw, want in norm_ok:
+        got = m.normalize_base(raw)
+        chk(f"7.1 规范化 {raw!r} → {want!r}", got == want, f"得到 {got!r}")
+
+    # 7.2 Key 里的空白必须被清掉（粘贴事故：从聊天窗口复制带换行/空格）
+    #     事故：界面显示 `API Key： m2a_xxx`（前导空格），照抄到别处就认证失败。
+    import re as _re
+    messy = "  m2a_ c9c2\t6822\n e0c8  "
+    cleaned = _re.sub(r"\s+", "", messy.strip().strip('"').strip("'"))
+    chk("7.2 Key 中间空白被清掉", cleaned == "m2a_c9c26822e0c8", cleaned)
+
+    # 7.3 --port 非法值必须当场拒绝，不能默默用默认值
+    #     事故：`--port 99999` 直接拿去开调试端口，浏览器永远起不来，
+    #           报出来的错跟端口毫无关系。
+    for bad_port in ("0", "99999", "-1", "80"):
+        rc, out, err = run(["--base", "http://127.0.0.1:1", "--key", "m2a_x",
+                            "--port", bad_port], timeout=35)
+        chk(f"7.3 --port {bad_port} 被当场拒绝",
+            rc != 0 and "--port" in out, f"rc={rc} out={out[:150]!r}")
+
+    # 7.4 --count 负数必须明确报「不能是负数」
+    #     事故：`--count -1` 循环不成立、什么都没干，界面却显示
+    #           「没找到可用的浏览器」，小白以为是自己没装浏览器。
+    rc, out, err = run(["--base", "http://127.0.0.1:1", "--key", "m2a_x",
+                        "--count", "-1"], timeout=35)
+    chk("7.4 --count 负数被当场拒绝",
+        rc != 0 and "负数" in out, f"rc={rc} out={out[:150]!r}")
+
+    # 7.5 `--remove` 后面没跟值 → 必须报「没给」，绝不能掉进导号流程
+    #     事故：小白想删账号，脚本却弹出一个浏览器要他登录 muse.ai。
+    rc, out, err = run(["--base", "http://127.0.0.1:1", "--key", "m2a_x",
+                        "--remove", ""], timeout=35)
+    chk("7.5 --remove 空值被当场拒绝（不会误入导号流程）",
+        rc != 0 and "--remove" in out and "登录" not in out,
+        f"rc={rc} out={out[:200]!r}")
+
+    # 7.6 --timeout 太短要提示（默认 300，给 10 秒肯定不够登录）
+    rc, out, err = run(["--base", "http://127.0.0.1:1", "--key", "m2a_x",
+                        "--timeout", "10"], timeout=35)
+    chk("7.6 --timeout 过短被当场拒绝",
+        rc != 0 and "--timeout" in out, f"rc={rc} out={out[:150]!r}")
+
+    # 7.7 空账号池时 --list 必须告诉小白「下一步跑什么」
+    #     事故：只显示一个「（空）」，小白不知道该干嘛。
+    if args.base and args.key:
+        # 用 28810 那种空池实例太依赖环境；直接测文案函数
+        buf = []
+        _say_backup = m.say
+        m.say = lambda s="": buf.append(str(s))
+        try:
+            m.print_accounts([], "http://x")
+        finally:
+            m.say = _say_backup
+        text = "\n".join(buf)
+        chk("7.7 空账号池给出「怎么加账号」指引",
+            ("账号池是空的" in text) and ("python get_muse_cookie.py" in text),
+            text[:300])
+
     print("\n" + "=" * 70)
     print(f"  结果：{PASS} 通过 / {FAIL} 失败" + (f" / {SKIP} 跳过" if SKIP else ""))
     print("=" * 70)

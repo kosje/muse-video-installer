@@ -3,6 +3,10 @@ data/
 install.conf
 *.log
 
+# Python 缓存（跑测试会生成）
+__pycache__/
+*.pyc
+
 # 编辑器
 .vscode/
 .idea/

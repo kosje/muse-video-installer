@@ -729,12 +729,35 @@ def ask_yes(prompt: str, default_no: bool = True) -> bool:
 
 
 def normalize_base(s: str) -> str:
-    s = s.strip().rstrip("/")
+    """把用户填的地址整理成规范的 http(s)://主机[:端口] 形式。
+
+    ⚠️ 必须做全的三件事（早期版本只做了最后一件，导致实测翻车）：
+      1. 协议头统一成小写：`HTTP://1.2.3.4` 要变 `http://1.2.3.4`。
+         大写协议在有些 HTTP 客户端/代理上会被拒，而且显示出来很怪。
+      2. 去掉**所有**尾部斜杠与路径：`http://1.2.3.4:18610///` 要变
+         `http://1.2.3.4:18610`。早期版本只 rstrip 一次，于是
+         `...///` 变成一个带路径的地址，拿去做 `...///admin/accounts`
+         请求会 404 或返回空 —— 但自检还显示「连接正常」（因为状态码不是
+         401/403/404 里被识别的那几个），小白完全查不出来。
+      3. 没有协议头时补 `http://`。
+    """
+    s = (s or "").strip()
     if not s:
         return s
-    if not re.match(r"^https?://", s, re.I):
-        s = "http://" + s
-    return s
+    # 协议头统一小写
+    m = re.match(r"^(https?)://", s, re.I)
+    if m:
+        scheme = m.group(1).lower()
+        rest = s[m.end():]
+    else:
+        scheme = "http"
+        rest = s
+    # 只保留主机[:端口] 部分，路径/查询/锚点一律丢掉
+    rest = rest.split("/", 1)[0].split("?", 1)[0].split("#", 1)[0]
+    rest = rest.strip().rstrip("/")
+    if not rest:
+        return ""
+    return f"{scheme}://{rest}"
 
 
 def looks_like_address(s: str) -> bool:
@@ -986,13 +1009,58 @@ def main() -> int:
 
     banner("muse.ai 账号导入助手")
 
+    # ---- 先做参数体检，把小白填错的地方当场说清楚
+    #
+    # ⚠️ 为什么要在最前面单独做一遍：
+    #    早期版本对 --port / --count 的非法值是"默默用默认值"，然后走到
+    #    后面的流程里报一个**牛头不对马嘴**的错。实测出现的两个例子：
+    #      · `--count 0` / `--count -1` → 循环条件不成立，什么都没干，
+    #        界面上却显示"没找到可用的浏览器"，小白以为是自己没装浏览器；
+    #      · `--port 0` / `99999` / `-1` → 直接拿去当调试端口，浏览器一定起不来。
+    #    这里的判据很简单：值不合法就明确告诉他"你给的数字不对"，并给出合法范围。
+    if args.port < 1024 or args.port > 65535:
+        say(f"  {_BAD_MARK} --port 给的 {args.port} 不是合法端口。")
+        say("    要一个 1024~65535 之间的数字（默认 9432，一般不用改）。")
+        return 2
+    if args.count < 0:
+        say(f"  {_BAD_MARK} --count 不能是负数（你给的是 {args.count}）。")
+        say("    想连导 3 个就写：python get_muse_cookie.py --count 3")
+        return 2
+    if args.timeout < 30:
+        say(f"  {_BAD_MARK} --timeout 给的 {args.timeout} 秒太短了。")
+        say("    登录 muse.ai 需要时间，建议至少 120 秒（默认 300）。")
+        return 2
+    # ⚠️ `--remove ""` 曾经是个很坑的坑：args.remove 为空字符串时
+    #    `if args.list or args.remove` 为假，脚本直接掉进"导入账号"的分支，
+    #    于是小白想删账号，结果被弹出一个浏览器要求登录 —— 完全不知所措。
+    #    这里用 `--remove` 是否**出现过**来判断，而不是看它的值空不空。
+    remove_given = any(a == "--remove" or a.startswith("--remove=")
+                       for a in sys.argv[1:])
+    if remove_given and not args.remove.strip():
+        say(f"  {_BAD_MARK} --remove 后面要跟账号的 id 或标签，但你没给。")
+        say("    先看一眼有哪些账号：python get_muse_cookie.py --list")
+        say("    再删：              python get_muse_cookie.py --remove acc-02")
+        return 2
+    args.remove = args.remove.strip()
+
     # ---- 地址 / Key：命令行 > 环境变量 > 上次记住的 > 现场问
-    base = normalize_base(args.base
-                          or os.environ.get("MUSE2API_BASE", "")
-                          or conf.get("base", ""))
+    #
+    # ⚠️ 三个「去空格」不能省：
+    #    小白从网页/聊天窗口复制 Key 时，前后经常带上空格或换行。
+    #    早期版本只在发请求时去空格，**显示用的是原始值**，于是界面打印出
+    #    `API Key： m2a_c9c2682…`（开头有空格）。小白照这行字去填客户端配置
+    #    就会认证失败，而且完全看不出问题在哪。统一在这里 trim 一次。
+    base = normalize_base((args.base
+                           or os.environ.get("MUSE2API_BASE", "")
+                           or conf.get("base", "")).strip())
     key = (args.key
            or os.environ.get("MUSE2API_KEY", "")
-           or conf.get("key", ""))
+           or conf.get("key", "")).strip().strip('"').strip("'")
+
+    # ⚠️ Key 里夹了换行/空格时，光 strip 两端不够 —— 中间的空格一定是粘贴事故，
+    #    要去掉后再用（m2a_ 后面是纯十六进制，不该有任何空白）。
+    key = re.sub(r"\s+", "", key)
+
     interactive = not (args.base and args.key)
 
     if interactive:
@@ -1020,12 +1088,32 @@ def main() -> int:
             say("      python get_muse_cookie.py")
             return 2
 
-        if not key:
-            say("  API Key 是 m2a_ 开头的一长串，直接粘贴回来即可。")
-            key = ask_secret("  API Key：")
+        # ⚠️ Key 这一段的写法很讲究，早期版本有个很坑的显示 bug：
+        #       say("API Key 上次记的是 xxx（直接回车沿用）")
+        #       key = ask_secret("  API Key：") or key
+        #    ask_secret 的提示是 input() 打的、**不换行**，于是「上次记的是 xxx」
+        #    和「API Key：」两行挤在一起；而在日志/管道场景下 input 读不到东西，
+        #    界面上就出现一个**空的 `API Key：`**，小白根本不知道自己到底在用哪个
+        #    Key —— 和之前修的「地址静默沿用」是同一类错误。
+        #    正解：把「沿用 / 重填」讲成一句话，让人一眼看清用的哪个 Key。
+        if key:
+            say(f"  这个 Key 我还记着：{key[:12]}…")
+            say(f"  {_OK_MARK} 直接回车就用它；想换一个就现在粘贴新的。")
+            typed = ask_secret("  API Key（回车沿用）：")
+            if typed:
+                key = re.sub(r"\s+", "", typed.strip().strip('"').strip("'"))
+            else:
+                say(f"  {_OK_MARK} 沿用 {key[:12]}…")
         else:
-            say(f"  API Key 上次记的是 {key[:12]}…（直接回车沿用）")
-            key = ask_secret("  API Key：") or key
+            say("  API Key 是 m2a_ 开头的一长串，直接粘贴回来即可。")
+            say("  （在你的服务器上跑 `bash install.sh --status` 能看到）")
+            key = re.sub(
+                r"\s+", "",
+                ask_secret("  API Key：").strip().strip('"').strip("'"))
+            if not key:
+                say(f"  {_BAD_MARK} 没读到 Key。要么粘贴一个，要么用参数指定：")
+                say("      python get_muse_cookie.py --key m2a_xxx")
+                return 2
     else:
         say(f"  服务器：{base}")
         say(f"  API Key：{key[:12]}…")
@@ -1048,6 +1136,9 @@ def main() -> int:
 
     # ---- 只列表 / 只删除，做完就走
     if args.list or args.remove:
+        # 两个一起给时 --remove 优先，但必须说一声，别让 --list 被静默忽略。
+        if args.list and args.remove:
+            say(f"  {_WARN_MARK} 你同时给了 --list 和 --remove，先执行删除。")
         try:
             accts = list_accounts(base, key)
         except RuntimeError as exc:
@@ -1061,6 +1152,10 @@ def main() -> int:
                 say(f"  {_BAD_MARK} 没找到 id 或标签为 {args.remove} 的账号。"
                     "跑 --list 看看有哪些。")
                 return 8
+            # ⚠️ 删除是不可逆的，先把要删的那个账号打出来让小白核对一眼。
+            t = hit[0]
+            say(f"  即将删除：{t.get('label') or '(无名)'}  "
+                f"（id {t.get('id')}）")
             if delete_account(base, key, args.remove):
                 say(f"  {_OK_MARK} 已删除：{args.remove}")
             else:
@@ -1205,9 +1300,18 @@ def print_accounts(accts: list[dict], base: str) -> None:
         st = a.get("status") or a.get("state") or "ok"
         say(f"    {label:<20}{aid:<18}{str(n):<8}{st}")
     say()
+    # ⚠️ 空账号池不能只甩一个「（空）」就完事。
+    #    小白跑 --list 就是为了确认"我到底导进去没有"，看到空表会懵在当场、
+    #    不知道该干什么。必须把"下一步跑什么"直接写在脸上。
     if not accts:
-        say("    （空）")
-    say(f"  管理页面：{base}/admin?key=<你的Key>")
+        say(f"    {_WARN_MARK} 账号池是空的 —— 一个账号都还没导入。")
+        say()
+        say("    加一个账号很简单，敲这一条就行（会自动弹浏览器让你登录）：")
+        say("        python get_muse_cookie.py")
+        say()
+        say("    想一口气加几个：python get_muse_cookie.py --count 3")
+        return
+    say(f"  共 {len(accts)} 个账号。管理页面：{base}/admin?key=<你的Key>")
 
 
 if __name__ == "__main__":

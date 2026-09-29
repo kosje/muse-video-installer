@@ -561,6 +561,22 @@ sudo bash install.sh --dir /opt/mvw-2 --api-port 18620 --web-port 8100
 默认安装目录是 `/opt/mvw`，默认容器名 `mvw`，默认服务名 `mvw-web.service` ——
 刻意选了不常见的名字，就是为了降低撞名概率。
 
+**目录名是中文也没问题**（比如 `/opt/视频工作台`）。脚本会给 compose 显式指定一个
+ASCII 项目名，不会踩到 Docker「项目名不能为空」那个坑。而且不同目录会派生出不同名字，
+所以你在两个目录各装一份也不会互相覆盖。
+
+---
+
+## 装完之后常见的几个小疑问
+
+| 情况 | 怎么办 |
+|---|---|
+| **装完发现网页打不开** | 先确认云服务商**安全组/防火墙**放行了那两个端口（控制台里加），再用 `sudo bash install.sh --status` 核对地址 |
+| **给了 `--domain` 但域名打不开** | 多半是 DNS 还没解析到这台机器。装完最后的提示会告诉你：先用 `IP:端口` 访问，等 DNS 生效后重跑 `sudo bash install.sh --domain 你的域名` 就会自动配上 HTTPS |
+| **嫌下载太慢，按了 Ctrl+C** | 不要紧。重跑同一条命令就会接着来（脚本可以安全重复运行），想先看进度用 `--status` |
+| **反复装了很多次，突然新装起不来** | Docker 的网段可能被分光了（报 `address pools have been fully subnetted`）。跑 `docker network prune -f` 清掉没人用的网络再重试 |
+| **想改端口 / 改目录重装** | 直接重跑，加新的 `--api-port` / `--web-port` 即可。**API Key 会沿用**，已配置的客户端不用改 |
+
 ---
 
 ## 卸载 / 排障速查
@@ -570,9 +586,25 @@ sudo bash install.sh --dir /opt/mvw-2 --api-port 18620 --web-port 8100
 | 看状态 | `sudo bash install.sh --status` |
 | 升级 | `sudo bash install.sh --upgrade` |
 | 卸载 | `sudo bash install.sh --uninstall` |
-| 看容器日志 | `cd /opt/mvw && docker compose logs -f` |
-| 看网页日志 | `journalctl -u muse-video-web.service -f` |
+| 看容器日志 | `cd /opt/mvw && docker compose -p mvw logs -f` |
+| 看网页日志 | `journalctl -u mvw-web.service -f` |
 | 看谁占端口 | `sudo ss -lntp \| grep <端口>` |
+| 清理没人用的 Docker 网络 | `docker network prune -f` |
+
+---
+
+## 自测（可选）
+
+仓库自带两套回归测试，改完代码可以自己跑：
+
+```bash
+# 安装脚本：58 项（语法、参数校验、dry-run、真实安装、幂等重跑、
+#           端口冲突、卸载、以及五轮实测踩出来的缺陷回归）
+sudo bash test-install.sh
+
+# 导号工具：61 项（地址校验、cookie 解析、错误路径、真实服务器交互）
+python3 tools/test-import-tool.py --base http://你的IP:18610 --key m2a_xxx
+```
 
 ---
 

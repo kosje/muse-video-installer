@@ -28,6 +28,22 @@ cleanup_all() {
   rm -f /etc/systemd/system/muse-conflict-name-web.service
   systemctl daemon-reload >/dev/null 2>&1
   rm -rf "$TDIR" /opt/muse-conflict /opt/muse-conflict-name
+  # ⚠️ 第 8 组（端口冲突）会在 /opt/muse-conflict 派生出 muse-conflict-web.service
+  #    并让它占着测试端口。早期版本没清这个 unit，于是它一直 active、
+  #    把 28719 端口长期占住 —— 后来再跑端口相关用例就会莫名"冲突"。
+  #    这里显式收掉它（以及它的进程）。
+  systemctl disable --now muse-conflict-web.service >/dev/null 2>&1
+  rm -f /etc/systemd/system/muse-conflict-web.service
+  systemctl daemon-reload >/dev/null 2>&1
+  rm -rf /opt/muse-conflict
+  # 五轮实测新增的临时对象（都得点名清理，不用通配）
+  docker rm -f muse-netcheck >/dev/null 2>&1
+  systemctl disable --now muse-netcheck-web.service >/dev/null 2>&1
+  rm -f /etc/systemd/system/muse-netcheck-web.service
+  for d in /tmp/muse-drychk /tmp/muse-drychk2 /opt/muse-netcheck; do
+    rm -rf "$d"
+  done
+  systemctl daemon-reload >/dev/null 2>&1
 }
 
 # ─────────────────────────────────────────────
@@ -238,7 +254,94 @@ case "$SO" in
   *) t_fail "--status 报告异常" "$(printf '%s' "$SO" | head -3 | tr '\n' ' ')" ;;
 esac
 
-t_case "11. 清理测试残留"
+t_case "11. 五轮实测缺陷回归（2026-09-29）"
+# 这一组锁定的是**真机上跑出来的**安装脚本缺陷，每条都对应一次真实事故。
+
+# 11.1 安装目录不可写 → 必须当场失败，绝不能打印「配置完成」骗人
+#      事故：--dir /proc/nope/mvw 时脚本假装成功，最后才在 cd 处炸，
+#            还让小白去一个不存在的目录看日志。
+bash "$INSTALLER" --yes --dir /proc/nope/mvw --api-port 28791 --web-port 28792 >/tmp/r1.log 2>&1
+RC_R1=$?
+if [ "$RC_R1" != 0 ] && ! grep -q "配置完成" /tmp/r1.log && grep -q "建不了安装目录\|写不进去" /tmp/r1.log; then
+  t_ok "不可写目录当场失败且不谎报成功"
+else
+  t_fail "不可写目录没拦住 / 谎报了成功" "rc=$RC_R1 $(grep -E '配置完成|建不了|写不进去' /tmp/r1.log | head -2 | tr '\n' ' ')"
+fi
+
+# 11.2 目录名全是中文 → 必须能装成功
+#      事故：compose 拿中文目录当项目名，推导出空串 → project name must not be empty。
+#      国内小白极容易把目录设在含中文的路径下。
+CN_DIR="/tmp/视频工作台测试"
+rm -rf "$CN_DIR"
+bash "$INSTALLER" --yes --dir "$CN_DIR" --api-port 28793 --web-port 28794 >/tmp/r2.log 2>&1
+RC_R2=$?
+if [ "$RC_R2" = 0 ] && ! grep -q "project name must not be empty" /tmp/r2.log; then
+  t_ok "中文目录名能正常安装（compose 项目名已显式指定）"
+else
+  t_fail "中文目录名安装失败" "rc=$RC_R2 $(grep -E 'project name|启动失败' /tmp/r2.log | head -2 | tr '\n' ' ')"
+fi
+# 收尾：把中文目录装出来的实例清掉。
+# 容器名 = 目录名派生（中文目录会得到 mvw-<6位十六进制哈希>）。
+# ⚠️ 一定要用这个精确模式，不能用 `name=mvw-` 粗匹配 ——
+#    那会连用户的 mvw-chk2 一起删掉。
+CN_CID="$(docker ps -a --format '{{.Names}}' | grep -E '^mvw-[0-9a-f]{6}$' | head -1)"
+[ -n "$CN_CID" ] && docker rm -f "$CN_CID" >/dev/null 2>&1
+rm -rf "$CN_DIR"
+for u in /etc/systemd/system/mvw-*-web.service; do
+  [ -f "$u" ] || continue
+  case "$(basename "$u")" in
+    mvw-chk2-web.service) continue ;;   # 别动这个
+  esac
+  systemctl disable --now "$(basename "$u")" >/dev/null 2>&1
+  rm -f "$u"
+done
+systemctl daemon-reload >/dev/null 2>&1
+
+# 11.3 每次安装不得新建 docker 网络（否则反复安装会把地址池分光）
+#      事故：28 个网络把 172.17~172.31 的池子耗干，之后所有容器都起不来，
+#            报「all predefined address pools have been fully subnetted」。
+NET_BEFORE="$(docker network ls --format '{{.Name}}' | wc -l)"
+rm -rf /opt/muse-netcheck
+bash "$INSTALLER" --yes --dir /opt/muse-netcheck --api-port 28795 --web-port 28796 >/tmp/r3.log 2>&1
+NET_AFTER="$(docker network ls --format '{{.Name}}' | wc -l)"
+if [ "$NET_BEFORE" = "$NET_AFTER" ]; then
+  t_ok "安装不新建 docker 网络（网络数保持 $NET_BEFORE）"
+else
+  t_fail "安装新建了 docker 网络（$NET_BEFORE → $NET_AFTER，会耗尽地址池）"
+fi
+docker rm -f muse-netcheck >/dev/null 2>&1
+systemctl disable --now muse-netcheck-web.service >/dev/null 2>&1
+rm -f /etc/systemd/system/muse-netcheck-web.service
+rm -rf /opt/muse-netcheck
+systemctl daemon-reload >/dev/null 2>&1
+
+# 11.4 dry-run 不得出现「端口被占，换一个」和最终端口自相矛盾
+#      事故：先提示 18610 被占会自动换，最后却显示 18610，自相矛盾。
+bash "$INSTALLER" --dry-run --yes --dir /tmp/muse-drychk >/tmp/r4.log 2>&1
+if grep -q "会自动往上找空闲端口" /tmp/r4.log; then
+  t_fail "dry-run 仍输出误导性的端口避让提示"
+else
+  t_ok "dry-run 不再输出误导性的端口提示"
+fi
+rm -rf /tmp/muse-drychk
+
+# 11.5 Ctrl+C 提示（脚本里必须有 INT 处理）
+if grep -q "trap on_interrupt INT" "$INSTALLER" && grep -q "安装中断了" "$INSTALLER"; then
+  t_ok "Ctrl+C 有友好中断提示"
+else
+  t_fail "缺少 Ctrl+C 中断提示"
+fi
+
+# 11.6 生成的 compose 必须带 network_mode: bridge
+bash "$INSTALLER" --dry-run --yes --dir /tmp/muse-drychk2 >/dev/null 2>&1
+rm -rf /tmp/muse-drychk2
+if grep -q 'network_mode: bridge' "$INSTALLER"; then
+  t_ok "compose 模板使用 bridge 网络（不消耗地址池）"
+else
+  t_fail "compose 模板没设 network_mode: bridge"
+fi
+
+t_case "12. 清理测试残留"
 cleanup_all
 [ ! -d "$TDIR" ] && t_ok "测试目录已清理" || t_fail "残留 $TDIR"
 

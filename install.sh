@@ -73,6 +73,8 @@ WEB_PORT=""
 DOMAIN=""
 NO_DOMAIN=0
 ADV_GIVEN=0
+# 用户要了域名、但 DNS 没生效导致这次没配上的话，记在这里，验收清单里再提一次
+DOMAIN_SKIPPED=""
 
 RUN_LOG=""
 
@@ -310,13 +312,27 @@ port_owned_by_us() {
 
 pick_port() {
   local p="$1"
+  local moved=0
   while ! port_free "$p"; do
     # 是自家旧容器占的 → 不换端口，直接沿用（它会原地重建）
     if port_owned_by_us "$p"; then
       printf '%s' "$p"
       return 0
     fi
-    warn "端口 $p 已被占用，换一个"
+    # ⚠️ 文案分两种：
+    #    真实安装时说「已被占用，换一个」是对的（脚本真的会自动往上找）；
+    #    但在 dry-run 里这么说会让小白**误以为必须自己手动换端口** ——
+    #    实测时 dry-run 打出「端口 18610 已被占用，换一个」，
+    #    而 18610 只是这台机器上别的服务占的，脚本本来就会自动避开。
+    #    dry-run 要说清楚"这是自动的，不用管"。
+    if [ "$DRY_RUN" = 1 ]; then
+      if [ "$moved" = 0 ]; then
+        say "    [dry-run] 端口 $p 被占了，脚本会自动往上找空闲端口（不用管）"
+      fi
+    else
+      warn "端口 $p 已被占用，换一个"
+    fi
+    moved=1
     p=$((p + 1))
     if [ "$p" -gt 65535 ]; then die "找不到空闲端口了，请用 --web-port 手动指定"; fi
   done
@@ -426,6 +442,19 @@ pkg_install() {
 docker_ok() { command -v docker >/dev/null 2>&1; }
 
 compose_ok() { docker compose version >/dev/null 2>&1; }
+
+# 统一的 compose 调用入口。
+#
+# ⚠️ 为什么必须显式带 -p（项目名）：
+#    docker compose 默认拿**目录名**当项目名。目录名如果全是中文（国内太常见了，
+#    比如 /opt/视频工作台），推导出来的项目名字符全被过滤掉，只剩空串，
+#    compose 直接报 `project name must not be empty`，安装当场失败 ——
+#    而报错信息里完全看不出是"目录名是中文"引起的，小白绝对查不出来。
+#    显式给一个 ASCII 的项目名（和容器名一致）就彻底绕开这个坑，
+#    顺带保证「不同目录 → 不同项目」，多份安装互不干扰。
+compose() {
+  docker compose -p "$CONTAINER_NAME" "$@"
+}
 
 ensure_docker() {
   if docker_ok; then
@@ -608,7 +637,17 @@ derive_names() {
   base="$(basename "$INSTALL_DIR")"
   # 只保留字母数字和连字符，避免 docker 容器名非法
   base="$(printf '%s' "$base" | tr -c 'a-zA-Z0-9_.-' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')"
-  [ -n "$base" ] || base="$APP_NAME"
+  # ⚠️ 目录名如果全是中文/emoji（国内很常见，比如 /opt/视频工作台），
+  #    上面那步会把整串都换成 '-'，清洗完**什么都不剩**。
+  #    早期版本这时直接退回默认名 "$APP_NAME"，后果是：你在两个不同中文目录
+  #    各装一份，两份的容器名/服务名**一模一样**，第二份会覆盖第一份 ——
+  #    而且报错信息是别的（project name must not be empty），小白根本联想不到。
+  #    这里改成：清不干净时挂一个目录路径的短哈希，保证「不同目录 → 不同名字」。
+  if [ -z "$base" ]; then
+    local h
+    h="$(printf '%s' "$INSTALL_DIR" | cksum | awk '{print $1}')"
+    base="${APP_NAME}-$(printf '%x' "$h" | cut -c1-6)"
+  fi
   CONTAINER_NAME="$base"
   WEB_UNIT="${base}-web.service"
   CADDY_NAME="${base}-caddy"
@@ -643,6 +682,18 @@ services:
     image: ${CONTAINER_NAME}:latest
     container_name: ${CONTAINER_NAME}
     restart: always
+    # ⚠️ 用默认 bridge 网络，**不要**让 compose 新建项目网络。
+    #
+    #    为什么：docker 默认的地址池只有 172.17~172.31 这一小段 /16。
+    #    compose 默认会为**每个项目**新建一个网络，各占一个网段。
+    #    一台机器上反复安装/卸载、或者本来就有不少容器时，池子很快被分光，
+    #    之后所有新容器都起不来，报的还是天书：
+    #        all predefined address pools have been fully subnetted
+    #    实测就撞上了这个（28 个网络把池子耗干）。小白看到这行完全无法自救。
+    #
+    #    这个应用只有**一个**容器、只靠端口对外服务，根本不需要项目内网，
+    #    共享 bridge 网络完全够用，而且再也不消耗地址池（多装几份也无所谓）。
+    network_mode: bridge
     ports:
       - "${API_PORT}:${API_PORT}"
     # 上游 Dockerfile 把 --port 18610 写死了，这里必须显式覆盖，
@@ -1210,6 +1261,14 @@ print_next_steps() {
   say "  API Key：       ${API_KEY}"
   say "  安装目录：      ${INSTALL_DIR}"
   say "  账号池面板：    http://${IP}:${API_PORT}/admin?key=${API_KEY}"
+  # ⚠️ 用户要了域名但这次没配上（DNS 没生效），必须在这里再明确说一次：
+  #    否则上面那些 "✓ 服务已启动" 会让他以为域名能用了，打开却打不开。
+  if [ -n "${DOMAIN_SKIPPED:-}" ]; then
+    say ""
+    warn "你给的域名 ${DOMAIN_SKIPPED} 这次没生效 —— 现在请先用上面的 IP 地址访问。"
+    warn "等 DNS 解析到这台机器后，重跑一遍安装即可自动配上 HTTPS："
+    warn "    sudo bash ${SELF} --domain ${DOMAIN_SKIPPED}"
+  fi
   say ""
   say "  常用命令："
   say "    sudo bash ${SELF} --status      看运行状态（也能把上面的地址和 Key 再打印一遍）"
@@ -1254,17 +1313,25 @@ do_install() {
   # 端口
   # 说明：如果端口是「本安装目录自己的旧容器」占着的，视为可用（会原地重建），
   # 这样重复安装 / 改配置重跑才不会撞墙。
-  if [ -z "$API_PORT" ]; then
-    API_PORT="$(pick_port "$DEFAULT_API_PORT")"
-    [ "$DRY_RUN" = 1 ] && API_PORT="$DEFAULT_API_PORT"
+  #
+  # ⚠️ dry-run 下**不要**去真正探测端口：
+  #    探测结果会被下面重置回默认值，于是"端口被占，会自动往上找"这句提示
+  #    和最后显示的端口自相矛盾（实测：先说 18610 被占，最后又显示 18610），
+  #    小白看了完全懵。dry-run 只演示默认值，跳过探测最省事也最不容易误导。
+  if [ "$DRY_RUN" = 1 ]; then
+    [ -n "$API_PORT" ] || API_PORT="$DEFAULT_API_PORT"
+    [ -n "$WEB_PORT" ] || WEB_PORT="$DEFAULT_WEB_PORT"
   else
-    require_port_usable "$API_PORT" "接口"
-  fi
-  if [ -z "$WEB_PORT" ]; then
-    WEB_PORT="$(pick_port "$DEFAULT_WEB_PORT")"
-    [ "$DRY_RUN" = 1 ] && WEB_PORT="$DEFAULT_WEB_PORT"
-  else
-    require_port_usable "$WEB_PORT" "网页"
+    if [ -z "$API_PORT" ]; then
+      API_PORT="$(pick_port "$DEFAULT_API_PORT")"
+    else
+      require_port_usable "$API_PORT" "接口"
+    fi
+    if [ -z "$WEB_PORT" ]; then
+      WEB_PORT="$(pick_port "$DEFAULT_WEB_PORT")"
+    else
+      require_port_usable "$WEB_PORT" "网页"
+    fi
   fi
 
   step "开始检查环境"
@@ -1291,7 +1358,23 @@ do_install() {
 
   step "准备程序文件"
   if [ "$DRY_RUN" != 1 ]; then
-    mkdir -p "$INSTALL_DIR"
+    # ⚠️ 创建目录之后必须**立刻验证真的写进去了**，不能只 mkdir 完就往下走。
+    #    实测事故：把 --dir 指到 /proc/nope/mvw（父级不存在且不可写）时，
+    #    mkdir 失败了却被忽略，脚本一路打印「✓ 配置完成」，直到最后
+    #    `cd $INSTALL_DIR` 才炸，报一句没头没尾的 "No such file or directory"，
+    #    还让小白去 `cd /proc/nope/mvw` 看日志（一个根本不存在的目录）。
+    #    早失败在「准备程序文件」这一步，比晚失败在「启动服务」好得多。
+    if ! mkdir -p "$INSTALL_DIR" 2>/dev/null; then
+      die "建不了安装目录 $INSTALL_DIR（上级目录不存在或没有写权限）。
+    换个目录试试，比如：
+      bash $SELF --dir /opt/mvw --api-port $API_PORT --web-port $WEB_PORT
+    （/opt 或你的家目录一般都行）"
+    fi
+    if ! touch "$INSTALL_DIR/.write-test" 2>/dev/null; then
+      die "安装目录 $INSTALL_DIR 建出来了，但写不进去（磁盘满？只读挂载？权限不够？）。
+    检查一下：df -h $INSTALL_DIR  和  ls -ld $INSTALL_DIR"
+    fi
+    rm -f "$INSTALL_DIR/.write-test"
     if [ -f "$INSTALL_DIR/.env" ]; then rm -f "$INSTALL_DIR/.env"; fi  # 统一用 compose 环境变量
   fi
   fetch_muse2api "$INSTALL_DIR"
@@ -1331,25 +1414,31 @@ do_install() {
     IP_NOW="$(public_ip)"
     RESOLVED="$(getent hosts "$DOMAIN" 2>/dev/null | awk '{print $1}' | head -1)"
     if [ -z "$RESOLVED" ]; then
-      warn "域名 $DOMAIN 解析不出来（可能还没生效）"
-      warn "先跳过 HTTPS，网页用 IP:${WEB_PORT} 也能正常访问"
+      # ⚠️ 这里只 warn 是不够的：早期版本 warn 完就继续，最后照样打印
+      #    「✓ 网页服务已启动」，小白以为域名能用了，打开却打不开。
+      #    必须把"域名这次没生效、现在只能用 IP 访问"记下来，
+      #    在最后的验收清单里再明确说一次。
+      warn "域名 $DOMAIN 解析不出来（DNS 还没生效？）"
+      warn "这次先不配 HTTPS —— 域名暂时用不了。"
+      DOMAIN_SKIPPED="$DOMAIN"
       DOMAIN=""
     elif [ -n "$IP_NOW" ] && [ "$RESOLVED" != "$IP_NOW" ]; then
       warn "域名 $DOMAIN 解析到 $RESOLVED，但本机公网 IP 是 $IP_NOW"
-      warn "先跳过 HTTPS（DNS 没指对的话证书签不下来）"
+      warn "这次先不配 HTTPS（DNS 没指对，证书签不下来）。"
+      DOMAIN_SKIPPED="$DOMAIN"
       DOMAIN=""
     else
-      setup_domain_caddy || { warn "HTTPS 配置失败，网页仍可用 IP:${WEB_PORT} 访问"; DOMAIN=""; }
+      setup_domain_caddy || { warn "HTTPS 配置失败，网页仍可用 IP:${WEB_PORT} 访问"; DOMAIN_SKIPPED="$DOMAIN"; DOMAIN=""; }
     fi
   fi
 
   step "启动服务"
   if [ "$DRY_RUN" = 1 ]; then
-    printf '    %s[dry-run]%s cd %s && docker compose up -d --build\n' "$C_CYN" "$C_OFF" "$INSTALL_DIR"
+    printf '    %s[dry-run]%s cd %s && docker compose -p %s up -d --build\n' "$C_CYN" "$C_OFF" "$INSTALL_DIR" "$CONTAINER_NAME"
     printf '    %s[dry-run]%s systemctl enable --now %s-web.service\n' "$C_CYN" "$C_OFF" "$APP_NAME"
   else
     local out rc
-    out="$(cd "$INSTALL_DIR" && docker compose up -d --build 2>&1)"; rc=$?
+    out="$(cd "$INSTALL_DIR" && compose up -d --build 2>&1)"; rc=$?
     if [ "$rc" != 0 ]; then
       printf '%s\n' "$out" | tail -8 | sed 's/^/    /'
       case "$out" in
@@ -1358,7 +1447,15 @@ do_install() {
        或者卸载重装：sudo bash ${SELF} --uninstall" ;;
         *"address already in use"*|*"port is already allocated"*)
           die "端口被占用了，换个端口重跑：sudo bash ${SELF} --api-port <另一个端口>" ;;
-        *) die "启动失败（上面是原始输出）。可以看日志：cd $INSTALL_DIR && docker compose logs --tail=40" ;;
+        # docker 地址池被分光时的天书报错，翻译成人话 + 给出可操作步骤。
+        # （write_compose 已经用 network_mode: bridge 避免消耗池子，
+        #   但机器上如果本来就有别的 compose 项目把池子占满，仍可能撞上。）
+        *"address pools have been fully subnetted"*|*"could not find an available, non-overlapping IPv4 address pool"*)
+          die "Docker 的网段用完了 —— 这台机器上的网络太多了，开不出新网段。
+    清理一下没人用的旧网络就能继续（不会动到正在跑的服务）：
+      docker network prune -f
+    然后重跑本命令即可。" ;;
+        *) die "启动失败（上面是原始输出）。看日志：cd $INSTALL_DIR && docker compose -p $CONTAINER_NAME logs --tail=40" ;;
       esac
     fi
     ok "容器已启动"
@@ -1536,7 +1633,7 @@ do_uninstall() {
   fi
   step "停止并删除容器"
   if [ "$DRY_RUN" != 1 ]; then
-    (cd "$INSTALL_DIR" 2>/dev/null && docker compose down --remove-orphans 2>&1 | tail -2) || true
+    (cd "$INSTALL_DIR" 2>/dev/null && compose down --remove-orphans 2>&1 | tail -2) || true
     docker rm -f "$CADDY_NAME" >/dev/null 2>&1 || true
   fi
   step "摘除域名配置"
@@ -1574,7 +1671,7 @@ do_upgrade() {
   say ""
   step "升级 $APP_LABEL"
   if [ "$DRY_RUN" = 1 ]; then
-    printf '    %s[dry-run]%s git pull && docker compose up -d --build\n' "$C_CYN" "$C_OFF"
+    printf '    %s[dry-run]%s git pull && docker compose -p %s up -d --build\n' "$C_CYN" "$C_OFF" "$CONTAINER_NAME"
     return 0
   fi
   local old_id
@@ -1584,7 +1681,7 @@ do_upgrade() {
   else
     warn "安装目录不是 git 仓库，跳过拉取最新代码"
   fi
-  if (cd "$INSTALL_DIR" && docker compose up -d --build 2>&1 | tail -4); then
+  if (cd "$INSTALL_DIR" && compose up -d --build 2>&1 | tail -4); then
     if wait_api_ready; then
       ok "升级完成，服务正常"
     else
@@ -1644,5 +1741,22 @@ main() {
 
   do_install
 }
+
+# ⚠️ 小白按 Ctrl+C 中断时（比如嫌下载太慢），脚本默认什么都不说就退出了，
+#    他完全不知道自己中断到了哪一步、机器上留了什么、接下来该干什么。
+#    这里接住中断，明确告诉他：可以直接重跑，脚本是幂等的、会接着来。
+on_interrupt() {
+  printf '\n'
+  say "  ${C_YEL:-}按了 Ctrl+C，安装中断了。${C_OFF:-}"
+  say "  不用担心 —— 这个脚本可以安全地重复运行。刚才下到一半的文件、"
+  say "  装好的容器都会保留，重跑一次就会接着来："
+  say "      sudo bash ${SELF:-install.sh} --dir ${INSTALL_DIR:-/opt/mvw}"
+  say ""
+  say "  想看看现在装到哪了："
+  say "      sudo bash ${SELF:-install.sh} --status --dir ${INSTALL_DIR:-/opt/mvw}"
+  printf '\n'
+  exit 130
+}
+trap on_interrupt INT
 
 main "$@"
