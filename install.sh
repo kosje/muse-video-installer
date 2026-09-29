@@ -23,9 +23,11 @@ SELF="$(basename "$0")"
 [ -n "$SELF" ] || SELF="install.sh"
 
 SCRIPT_VERSION="1.0.0"
-APP_NAME="muse-video"
+# 前缀统一用 mvw-（Muse Video Workbench），避免和用户已有的 muse-video / muse2api
+# 等同名服务撞车 —— 曾因默认名与既有服务的 unit 重名，把别人的服务覆盖掉。
+APP_NAME="mvw"
 APP_LABEL="Muse 视频工作台"
-DEFAULT_DIR="/opt/muse-video"
+DEFAULT_DIR="/opt/mvw"
 DEFAULT_API_PORT=18610
 DEFAULT_WEB_PORT=8090
 MUSE2API_REPO="czg86389-hub/muse2api"
@@ -358,6 +360,51 @@ check_install_dir_writable() {
   fi
   die "创建不了目录 $INSTALL_DIR —— 它的上级 $probe 没有写权限。
        换个位置：sudo bash ${SELF} --dir /你的/可写/路径"
+}
+
+# 冲突保护：目标 systemd 单元 / 容器名如果已被「别人的服务」占着，就停下别动。
+# 背景：本脚本按安装目录派生 unit 名（如 /opt/mvw → mvw-web.service）。
+# 万一派生出的名字和机器上既有服务重名，直接写会把人家的服务覆盖掉
+# （开发期就真发生过：默认名与既有 muse-video-web.service 撞名，把正式服务删了）。
+assert_no_unit_conflict() {
+  [ "$DRY_RUN" = 1 ] && return 0
+  local unit="/etc/systemd/system/${WEB_UNIT}"
+  [ -f "$unit" ] || return 0
+  # 是我们的（内容里带我们的安装目录，或带我们的 Description）→ 放行，会原地重建
+  if grep -q -- "$INSTALL_DIR" "$unit" 2>/dev/null; then return 0; fi
+  if grep -q -- "$APP_LABEL (static site)" "$unit" 2>/dev/null; then return 0; fi
+  die "服务名冲突：$unit 已经存在，而且不是本脚本装的（指向别的目录）。
+       为避免覆盖别人的服务，已停止。
+       换个安装目录即可自动换个服务名：sudo bash ${SELF} --dir /opt/别的名字"
+}
+
+assert_no_container_conflict() {
+  [ "$DRY_RUN" = 1 ] && return 0
+  command -v docker >/dev/null 2>&1 || return 0
+  docker inspect "$CONTAINER_NAME" >/dev/null 2>&1 || return 0
+
+  # 认领判定（任一命中即认为是我们的，放行原地重建）：
+  #   ① docker compose 打的工程标签（最可靠）
+  #   ② 镜像 tag 是 <容器名> 开头（本脚本 build 时就这么打）
+  #   ③ 挂载点指向我们的安装目录
+  #   ④ 容器是我们 compose 文件里定义的服务名
+  local proj img mounts
+  proj="$(docker inspect "$CONTAINER_NAME" \
+            --format '{{index .Config.Labels "com.docker.compose.project"}}' 2>/dev/null)"
+  [ -n "$proj" ] && [ "$proj" != "<no value>" ] && return 0
+
+  img="$(docker inspect "$CONTAINER_NAME" --format '{{.Config.Image}}' 2>/dev/null)"
+  case "$img" in "${CONTAINER_NAME}"|"${CONTAINER_NAME}:"*|*"/${CONTAINER_NAME}:"*) return 0 ;; esac
+
+  mounts="$(docker inspect "$CONTAINER_NAME" \
+              --format '{{range .Mounts}}{{.Source}} {{end}}' 2>/dev/null)"
+  case " $mounts " in *" $INSTALL_DIR "*) return 0 ;; esac
+  case "$mounts" in *"$INSTALL_DIR"*) return 0 ;; esac
+
+  # 只有「容器在跑，且上面四个信号一个都对不上」才认为是别人的
+  die "容器名冲突：已有一个叫 $CONTAINER_NAME 的容器，而且不是本脚本装的。
+       为避免误删别人的容器，已停止。
+       换个安装目录即可自动换个容器名：sudo bash ${SELF} --dir /opt/别的名字"
 }
 
 # ── 依赖自动安装 ──────────────────────────────────────────────────────
@@ -1213,6 +1260,9 @@ do_install() {
 
   # 安装目录能否创建/写入 —— 提前拦住，别等下载完几百 MB 才失败
   check_install_dir_writable
+  # 命名冲突保护：宁可停下，也不覆盖别人的服务/容器
+  assert_no_unit_conflict
+  assert_no_container_conflict
 
   if [ "$DRY_RUN" != 1 ]; then
     ensure_git

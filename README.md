@@ -77,7 +77,7 @@ sudo bash install.sh --dry-run
 
 | 问题 | 默认 | 说明 |
 |---|---|---|
-| 装到哪个目录？ | `/opt/muse-video` | 一般不用改 |
+| 装到哪个目录？ | `/opt/mvw` | 一般不用改 |
 | 用哪个端口？ | 自动挑 | 会先看 `18610` / `8090` 有没有被占，占了就往后找 |
 
 然后它就自己干活了，大概 **2-5 分钟**：
@@ -113,7 +113,7 @@ sudo bash install.sh --dry-run
 网页地址：      http://你的服务器IP:8090/
 接口地址：      http://你的服务器IP:18610/v1
 API Key：       m2a_xxxxxxxxxxxxxxxxxxxx
-安装目录：      /opt/muse-video
+安装目录：      /opt/mvw
 账号池面板：    http://你的服务器IP:18610/admin?key=你的Key
 ```
 
@@ -196,10 +196,10 @@ sudo bash install.sh --help        # 看全部用法
 
 ```bash
 # 看日志
-cd /opt/muse-video && docker compose logs -f
+cd /opt/mvw && docker compose logs -f
 
 # 重启
-cd /opt/muse-video && docker compose restart
+cd /opt/mvw && docker compose restart
 
 # 看网页服务日志
 journalctl -u muse-video-web.service -f
@@ -219,12 +219,12 @@ sudo bash install.sh --uninstall
 |---|---|
 | 容器（muse-video） | ✅ 删除 |
 | 网页 systemd 服务 | ✅ 停止并删除 |
-| **安装目录 `/opt/muse-video`（含账号数据）** | **保留**（怕你误删） |
+| **安装目录 `/opt/mvw`（含账号数据）** | **保留**（怕你误删） |
 
 想**连数据一起删干净**，卸载后手动执行：
 
 ```bash
-sudo rm -rf /opt/muse-video
+sudo rm -rf /opt/mvw
 ```
 
 ---
@@ -354,7 +354,7 @@ sudo bash install.sh --no-domain
   --help, -h           显示帮助
 
 进阶：
-  --dir <路径>         安装到哪个目录（默认 /opt/muse-video）
+  --dir <路径>         安装到哪个目录（默认 /opt/mvw）
   --api-port <端口>    接口服务端口（默认自动挑，常用 18610）
   --web-port <端口>    网页端口（默认自动挑，常用 8090）
   --domain <域名>      给网页绑域名并自动配 HTTPS
@@ -382,10 +382,28 @@ sudo bash install.sh --domain video.example.com
 **可以。** 脚本会**从安装目录自动派生容器名和服务名**，所以：
 
 ```bash
-sudo bash install.sh --dir /opt/muse-video-2 --api-port 18620 --web-port 8100
+sudo bash install.sh --dir /opt/mvw-2 --api-port 18620 --web-port 8100
 ```
 
 两份互不干扰，各自独立端口、独立账号池。
+
+> ⚠️ 如果派生出来的名字**正好和机器上已有的服务重名**（且不是本脚本装的），
+> 脚本会**拒绝执行并提示你换个目录** —— 这是故意设计的，免得把别人的服务覆盖掉。
+
+---
+
+## 会和机器上已有的东西冲突吗？
+
+脚本做了三层保护，**不会**覆盖别人的东西：
+
+| 保护 | 行为 |
+|---|---|
+| **目录** | 目标目录不可写 → 提前报错，不会下载到一半才失败 |
+| **端口** | 被别人的程序占用 → 报错并给出 `ss -lntp` 排查命令；<br>被**自己上次的**容器占用 → 放行，原地重建 |
+| **服务名 / 容器名** | 已存在同名但**不是本脚本装的** → 拒绝执行，提示换目录 |
+
+默认安装目录是 `/opt/mvw`，默认容器名 `mvw`，默认服务名 `mvw-web.service` ——
+刻意选了不常见的名字，就是为了降低撞名概率。
 
 ---
 
@@ -396,7 +414,7 @@ sudo bash install.sh --dir /opt/muse-video-2 --api-port 18620 --web-port 8100
 | 看状态 | `sudo bash install.sh --status` |
 | 升级 | `sudo bash install.sh --upgrade` |
 | 卸载 | `sudo bash install.sh --uninstall` |
-| 看容器日志 | `cd /opt/muse-video && docker compose logs -f` |
+| 看容器日志 | `cd /opt/mvw && docker compose logs -f` |
 | 看网页日志 | `journalctl -u muse-video-web.service -f` |
 | 看谁占端口 | `sudo ss -lntp \| grep <端口>` |
 

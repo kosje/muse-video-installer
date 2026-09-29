@@ -19,14 +19,15 @@ t_fail() { FAIL=$((FAIL+1)); printf '  %s×%s %s\n' "$R" "$O" "$1"; [ $# -gt 1 ]
 t_case() { printf '\n%s▸ %s%s\n' "$B" "$1" "$O"; }
 
 cleanup_all() {
-  # ⚠️ 只操作本测试自己创建的对象（名字都带 muse-regress 前缀），
+  # ⚠️ 只操作本测试自己创建的对象（名字都带 muse-regress / muse-conflict 前缀），
   # 绝不用 muse-* 通配 —— 曾因此误删正式的 muse-video-web.service。
   cd "$TDIR" 2>/dev/null && docker compose down --remove-orphans >/dev/null 2>&1
   docker rm -f muse-regress muse-regress-caddy >/dev/null 2>&1
   systemctl disable --now muse-regress-web.service >/dev/null 2>&1
   rm -f /etc/systemd/system/muse-regress-web.service
+  rm -f /etc/systemd/system/muse-conflict-name-web.service
   systemctl daemon-reload >/dev/null 2>&1
-  rm -rf "$TDIR" /opt/muse-conflict
+  rm -rf "$TDIR" /opt/muse-conflict /opt/muse-conflict-name
 }
 
 # ─────────────────────────────────────────────
@@ -56,7 +57,12 @@ done
 _out="$(bash "$INSTALLER" --dir= 2>&1)"; _rc=$?
 [ "$_rc" != 0 ] && t_ok "--dir= 空值被拦" || t_fail "--dir= 空值未拦"
 # 缺值时必须不产生任何目录
-[ ! -d /opt/muse-video ] && t_ok "缺值未误装默认目录" || { t_fail "缺值误装了 /opt/muse-video"; }
+# 缺值时必须不产生任何目录（默认目录已改为 /opt/mvw，避免与既有服务撞名）
+if [ ! -d /opt/mvw ] && [ ! -d /opt/muse-video ]; then
+  t_ok "缺值未误装默认目录"
+else
+  t_fail "缺值误装了默认目录"
+fi
 
 t_case "2c. 参数冲突检查"
 # 注意：这些 case 的输出只用「是否匹配」来判断，绝不把输出塞进 t_ok 的参数，
@@ -166,6 +172,29 @@ K2="$(sed -n 's/^API_KEY=//p' "$TDIR/install.conf" 2>/dev/null | head -1)"
 grep -q "沿用上次的密钥" /tmp/re.log && t_ok "输出里说明了「沿用上次的密钥」" || t_fail "没提示沿用密钥"
 docker inspect muse-regress --format '{{.State.Status}}' 2>/dev/null | grep -q running \
   && t_ok "重跑后容器仍健康" || t_fail "重跑后容器异常"
+
+t_case "7b. 命名冲突保护（不覆盖别人的服务/容器）"
+# 造一个「别人的」unit，名字正好等于我们要派生的那个（/opt/muse-conflict-name → muse-conflict-name-web.service）
+FAKE_UNIT="/etc/systemd/system/muse-conflict-name-web.service"
+cat > "$FAKE_UNIT" <<'UEOF'
+[Unit]
+Description=someone else's service
+[Service]
+ExecStart=/bin/true
+UEOF
+systemctl daemon-reload >/dev/null 2>&1
+bash "$INSTALLER" --yes --dir /opt/muse-conflict-name --api-port 28731 --web-port 28732 >/tmp/nc.log 2>&1
+RC_NC=$?
+if [ "$RC_NC" != 0 ] && grep -q "冲突" /tmp/nc.log; then
+  t_ok "检测到别人的同名服务并拒绝覆盖"
+else
+  t_fail "没拦住同名服务冲突" "退出码=$RC_NC $(tail -2 /tmp/nc.log | tr '\n' ' ')"
+fi
+# 别人的 unit 必须原样还在
+grep -q "someone else's service" "$FAKE_UNIT" 2>/dev/null \
+  && t_ok "别人的 unit 未被改动" || t_fail "别人的 unit 被覆盖了！"
+rm -f "$FAKE_UNIT"; systemctl daemon-reload >/dev/null 2>&1
+rm -rf /opt/muse-conflict-name
 
 t_case "8. 端口冲突 fail-fast"
 # 用另一个安装目录去抢 muse-regress 已占的端口 —— 对脚本来说这是「外人占的」，
