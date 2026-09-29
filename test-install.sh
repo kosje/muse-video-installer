@@ -152,8 +152,12 @@ else
 fi
 rm -f /tmp/mv-web.html
 [ -f "$TDIR/install.conf" ] && t_ok "状态文件已生成" || t_fail "状态文件缺失"
-grep -qE "^SCRIPT_VERSION=1\.0\.0$" "$TDIR/install.conf" 2>/dev/null \
-  && t_ok "状态文件版本号正确（未被 os-release 污染）" \
+# 断言「版本号是我们自己的语义化版本」，而**不是**精确匹配某个号 ——
+# 否则每次发版都要来改测试（第一版写成 ^SCRIPT_VERSION=1\.0\.0$，
+# 升到 1.0.1 就误报"版本号异常"，纯属测试自己找麻烦）。
+# 真正要防的是「被 os-release 污染」，即值变成了像 "12" 这种系统版本号。
+grep -qE "^SCRIPT_VERSION=[0-9]+\.[0-9]+\.[0-9]+$" "$TDIR/install.conf" 2>/dev/null \
+  && t_ok "状态文件版本号是语义化版本（未被 os-release 污染）" \
   || t_fail "状态文件版本号异常" "$(grep SCRIPT_VERSION "$TDIR/install.conf" 2>/dev/null)"
 
 # ── API Key 的三道硬检查（这三条曾全部失守，是真事故级 bug）──
@@ -512,6 +516,23 @@ if [ "$RC1212" = 0 ] && [ -x /opt/muse-selfchk/install.sh ]; then
   else
     t_fail "自存的脚本副本跑不起来" "$(tail -1 /tmp/r1212b.log)"
   fi
+  # ⚠️ 关键补充：用**裸相对名**（cd 进去后 `bash install.sh`）调用时也必须能自存。
+  #    这是小白解压后的典型动作，早先的白名单匹配漏掉了它。
+  rm -rf /opt/muse-selfchk-rel
+  mkdir -p /tmp/muse-selfrel && cp "$INSTALLER" /tmp/muse-selfrel/install.sh
+  ( cd /tmp/muse-selfrel && bash install.sh --yes --dir /opt/muse-selfchk-rel \
+      --api-port 28822 --web-port 28823 ) >/tmp/r1212d.log 2>&1
+  if [ -x /opt/muse-selfchk-rel/install.sh ]; then
+    t_ok "裸相对名调用（bash install.sh）也能自存脚本"
+  else
+    t_fail "裸相对名调用没能自存脚本" "$(grep -m1 '常用命令' -A1 /tmp/r1212d.log)"
+  fi
+  bash /opt/muse-selfchk-rel/install.sh --uninstall --yes >/dev/null 2>&1
+  docker rm -f muse-selfchk-rel >/dev/null 2>&1
+  systemctl disable --now muse-selfchk-rel-web.service >/dev/null 2>&1
+  rm -f /etc/systemd/system/muse-selfchk-rel-web.service
+  systemctl daemon-reload >/dev/null 2>&1
+  rm -rf /opt/muse-selfchk-rel /tmp/muse-selfrel
   # 用副本卸载，收尾干净
   bash /opt/muse-selfchk/install.sh --uninstall --yes >/tmp/r1212c.log 2>&1
   docker rm -f muse-selfchk >/dev/null 2>&1

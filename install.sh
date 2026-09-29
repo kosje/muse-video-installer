@@ -32,9 +32,13 @@ SELF="$(basename "${0:-}")"
 # 不再依赖「用户当初把脚本下到哪了」。这一步是小白最需要的兜底：
 # 他很可能装完就把脚本删了 / 换成手机看，回头想升级时两手空空。
 SELF_PATH=""
-case "$0" in
-  /*|./*|../*|[A-Za-z]:[\\/]*) [ -f "$0" ] && SELF_PATH="$0" ;;
-esac
+# 判定很简单：$0 指向一个**真实存在的文件**，就认为「知道自己在哪」。
+# ⚠️ 早先写成匹配 /*、./*、../* 白名单，漏掉了最常见的一种调用：
+#    `cd /tmp/dir && bash install.sh`（相对名、不带 ./）—— 那是小白
+#    解压完之后的典型动作，结果自存功能直接失效。改成「存在即认」。
+if [ -f "${0:-}" ]; then
+  SELF_PATH="$0"
+fi
 case "$SELF" in
   bash|sh|dash|ash|zsh|ksh|"") SELF="install.sh"; SELF_PATH="" ;;
 esac
@@ -54,7 +58,7 @@ if [ -n "$SELF_PATH" ] && [ -f "$SELF_PATH" ]; then
   fi
 fi
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 # 前缀统一用 mvw-（Muse Video Workbench），避免和用户已有的 muse-video / muse2api
 # 等同名服务撞车 —— 曾因默认名与既有服务的 unit 重名，把别人的服务覆盖掉。
 APP_NAME="mvw"
