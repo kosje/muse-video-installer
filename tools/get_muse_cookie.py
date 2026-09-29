@@ -688,14 +688,35 @@ def parse_cookie_text(text: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------- 交互小工具
+def _prompt_line(tip: str) -> None:
+    """把「问题」按当前环境用合适的方式呈现出来。
+
+    ⚠️ 为什么要分两种情况（实测踩过）：
+        input(prompt) 的提示默认写到 stdout 且**不带换行**，光标停在提示符后面等输入。
+        交互终端里这很正常；但在**非交互**环境（管道、`< file`、IDE 内置终端）
+        输入会立刻被消费/EOF，于是下一行输出直接接在提示符后面，挤成一坨：
+
+            服务器地址（形如 …）：  这个 Key 我还记着：m2a_xxx
+                                   ^^^^^^^^^^^^^^^^^^^^ 两段提示粘在一起，小白看懵
+
+        所以：非交互时先把提示**独立打印一行**，再读输入；
+              交互时保持原来的「提示后跟光标」不变。
+    """
+    if sys.stdin.isatty():
+        print(tip, end="", flush=True)
+    else:
+        say(tip)
+
+
 def ask(prompt: str, default: str = "") -> str:
     """问一个问题；直接回车就用默认值。"""
     if default:
         tip = f"{prompt} [{default}]："
     else:
         tip = f"{prompt}："
+    _prompt_line(tip)
     try:
-        ans = input(tip).strip()
+        ans = input().strip() if not sys.stdin.isatty() else input(tip).strip()
     except EOFError:
         return default
     return ans or default
@@ -711,8 +732,9 @@ def ask_secret(prompt: str) -> str:
         这里用普通 input()：输入会回显，但对小白更友好（能看见自己粘了什么），
         并且 --key 参数 / 环境变量 / 配置记忆三条路都不依赖它。
     """
+    _prompt_line(prompt)
     try:
-        return input(prompt).strip()
+        return (input() if not sys.stdin.isatty() else input(prompt)).strip()
     except EOFError:
         return ""
 
@@ -1069,8 +1091,13 @@ def main() -> int:
         say()
         # ⚠️ 地址要重问，不能「填了别的就用上次的」——
         #    那会让小白误以为自己的输入生效了，实际连的是旧服务器。
+        #
+        #    ⚠️ 重试次数在「非交互」环境里必须是 1：那里根本没人能回答，
+        #       重试 5 次只会把同一段报错刷 5 遍（实测见过的画面），
+        #       小白只会更慌。非交互时第一次拿不到就停下，直接教他怎么用。
         hint = base or "1.2.3.4:18610"
-        for _try in range(5):
+        _maxtry = 5 if sys.stdin.isatty() else 1
+        for _try in range(_maxtry):
             raw = ask(f"  服务器地址（形如 {hint}）", base)
             if looks_like_address(raw):
                 base = normalize_base(raw)
@@ -1084,8 +1111,17 @@ def main() -> int:
             base = ""          # 清掉，逼着重填，别拿旧的顶上
             hint = "1.2.3.4:18610"
         else:
-            say(f"  {_BAD_MARK} 试了 5 次都不是地址，先退出了。重跑一次慢慢来：")
-            say("      python get_muse_cookie.py")
+            if sys.stdin.isatty():
+                say(f"  {_BAD_MARK} 试了 5 次都不是地址，先退出了。重跑一次慢慢来：")
+                say("      python get_muse_cookie.py")
+            else:
+                # 非交互：说明白原因 + 给出「不用问答」的正确用法
+                say()
+                say(f"  {_BAD_MARK} 当前不是交互终端，读不到你输入的地址。")
+                say("    想让它问你，请在自己的电脑上直接双击运行，或在这个窗口敲：")
+                say("        python get_muse_cookie.py")
+                say("    想一条命令跑完，把地址和 Key 直接写在命令里：")
+                say("        python get_muse_cookie.py --base http://1.2.3.4:18610 --key m2a_xxx")
             return 2
 
         # ⚠️ Key 这一段的写法很讲究，早期版本有个很坑的显示 bug：

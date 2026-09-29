@@ -24,6 +24,10 @@ import os
 import subprocess
 import sys
 
+# 注意：这里刻意**不** import pathlib —— 8.1 要读工具源码，直接用
+# open(path, encoding="utf-8") 就够了。少一个依赖，少一处可能在老 Python
+# 上出问题的地方。
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 TOOL = os.path.join(HERE, "get_muse_cookie.py")
 PY = sys.executable
@@ -261,6 +265,35 @@ def main() -> int:
         chk("7.7 空账号池给出「怎么加账号」指引",
             ("账号池是空的" in text) and ("python get_muse_cookie.py" in text),
             text[:300])
+
+    print("\n[8] 小白体验缺陷回归（2026-09-29 第二轮）")
+
+    # 8.1 非交互时提示必须独立成行，不能和后续输出挤在一起
+    #     事故：`服务器地址（…）：  这个 Key 我还记着：m2a_xxx`
+    #          两段提示粘成一行，小白不知道该敲什么。
+    with open(m.__file__, encoding="utf-8") as f:
+        src = f.read()
+    chk("8.1 有 _prompt_line 做非交互分行处理",
+        "def _prompt_line" in src, "未找到 _prompt_line")
+
+    # 8.2 非交互读不到地址时必须「只问一次」+ 给正确用法，不能刷屏 5 次
+    #     事故：管道里跑，同一段报错打 5 遍，看着像死循环。
+    chk("8.2 非交互时重试次数降为 1",
+        "_maxtry = 5 if sys.stdin.isatty() else 1" in src,
+        "未找到 _maxtry 逻辑")
+    chk("8.3 非交互失败时给出 --base/--key 用法",
+        "--base http://1.2.3.4:18610 --key m2a_" in src,
+        "未找到非交互的用法提示")
+
+    # 8.4 实跑一次：非交互空输入应当快速退出（rc=2），且输出不重复刷屏
+    #     ⚠️ 模拟方式：stdin_text="" —— 子进程的 stdin 是一根**已关闭的空管道**，
+    #        input() 立刻 EOF，正是「非交互、没人能回答」的场景。
+    #        （别写 stdin_empty=True，run() 没这个参数。）
+    rc, out, err = run([], stdin_text="", timeout=30)
+    joined = out + err
+    n_tips = joined.count("看着不像一个地址")
+    chk("8.4 非交互空输入只提示一次（不刷屏）",
+        rc == 2 and n_tips <= 1, f"rc={rc} 重复提示={n_tips} 次")
 
     print("\n" + "=" * 70)
     print(f"  结果：{PASS} 通过 / {FAIL} 失败" + (f" / {SKIP} 跳过" if SKIP else ""))

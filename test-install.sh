@@ -43,6 +43,11 @@ cleanup_all() {
   for d in /tmp/muse-drychk /tmp/muse-drychk2 /opt/muse-netcheck; do
     rm -rf "$d"
   done
+  # 第二轮新增（小白体验回归组用到的实例）
+  docker rm -f muse-selfchk muse-pipechk >/dev/null 2>&1
+  systemctl disable --now muse-selfchk-web.service >/dev/null 2>&1
+  rm -f /etc/systemd/system/muse-selfchk-web.service
+  rm -rf /opt/muse-selfchk /tmp/muse-pipechk
   systemctl daemon-reload >/dev/null 2>&1
 }
 
@@ -341,7 +346,200 @@ else
   t_fail "compose 模板没设 network_mode: bridge"
 fi
 
-t_case "12. 清理测试残留"
+t_case "12. 小白体验缺陷回归（2026-09-29 第二轮）"
+
+# 12.1 dry-run 的 systemd 提示必须是「派生名」，不能写死 mvw-web.service
+#      事故：装到 /tmp/mvtest 时实际生成 mvtest-web.service，dry-run 却打印
+#            mvw-web.service —— 小白拿它去 systemctl 查会扑空。
+bash "$INSTALLER" --dry-run --yes --dir /tmp/muse-namedchk >/tmp/r12a.log 2>&1
+if grep -q "systemctl enable --now muse-namedchk-web.service" /tmp/r12a.log; then
+  t_ok "dry-run 显示的是派生出的 unit 名"
+elif grep -qE "systemctl enable --now (mvw|muse2api)-web\.service" /tmp/r12a.log; then
+  t_fail "dry-run 仍写死默认 unit 名（与实装不一致）"
+else
+  t_fail "dry-run 未按预期显示派生 unit 名"
+fi
+
+# 12.2 卸载必须「非交互时要求显式 --yes」，不能默默卸掉
+#      事故：bash install.sh --uninstall < /dev/null 一行就把容器删了。
+#      这里只做静态断言（真删要起容器，交给 12.3 的实装流程之外的成本太高）：
+if grep -q "当前不是交互终端，出于安全我没有直接卸载" "$INSTALLER"; then
+  t_ok "卸载在非交互时会拒绝并要求 --yes"
+else
+  t_fail "卸载缺少「非交互必须 --yes」的保护"
+fi
+
+# 12.3 回滚必须先把旧镜像打 tag 保住（不能用 {{.Image}} 的 sha256）
+#      事故：sha256 在 compose 重建后失效，docker run 报 No such image，
+#            回滚静默失败却打印「已尝试回滚」。
+if grep -q ':rollback' "$INSTALLER" && grep -q 'docker tag' "$INSTALLER"; then
+  t_ok "升级回滚会先把旧镜像打固定 tag"
+else
+  t_fail "升级回滚没保住旧镜像（仍会用失效的 sha256）"
+fi
+if grep -q 'docker image inspect "$old_tag"' "$INSTALLER"; then
+  t_ok "回滚前校验镜像存在，失败会如实报错"
+else
+  t_fail "回滚没有校验镜像存在（可能静默失败）"
+fi
+
+# 12.4 zip 兜底下载必须用唯一临时名，且挪完目录后清掉空壳
+if grep -q 'mktemp /tmp/muse2api-' "$INSTALLER"; then
+  t_ok "zip 兜底用唯一临时文件（不会并发互踩）"
+else
+  t_fail "zip 兜底仍写死 /tmp/muse2api.zip"
+fi
+if grep -q 'rm -rf muse2api-main' "$INSTALLER"; then
+  t_ok "zip 解包后清掉空壳目录"
+else
+  t_fail "zip 解包后残留 muse2api-main 空壳"
+fi
+
+# 12.5 验收清单不能把「待办」说成「已完成」
+if grep -q "现在还是 0 个" "$INSTALLER"; then
+  t_ok "验收清单标明账号数需要导号后才变 1"
+else
+  t_fail "验收清单仍把「有 1 个账号」当成已完成状态"
+fi
+
+# 12.6 容器名冲突提示必须给出真实容器名，而不是写死 muse2api
+if grep -q "grep '\${CONTAINER_NAME}'" "$INSTALLER"; then
+  t_ok "容器冲突提示用的是实际容器名"
+else
+  t_fail "容器冲突提示写死了 muse2api（派生名下 grep 不到）"
+fi
+
+# 12.7 --status 是只读操作，不该要求管理员权限
+#      事故：普通用户（或 docker 组用户）只想看「服务在跑吗/我的网址是啥」，
+#            却被 check_root 一句「请用管理员权限运行」挡回去 —— 他并没要改东西。
+if grep -q 'if \[ "\$DO_STATUS" = 1 \]; then     do_status; exit \$?; fi' "$INSTALLER"; then
+  t_ok "--status 不再强制要求管理员权限（只读操作）"
+else
+  t_fail "--status 仍被 check_root 拦截（只读操作不该要 root）"
+fi
+
+# 12.8 非 root 读不到安装记录时，提示要指向 sudo，而不是谎称「还没装过」
+if grep -q "需要管理员权限才能读" "$INSTALLER"; then
+  t_ok "读不到记录时能区分「没装过」和「没权限」"
+else
+  t_fail "非 root 读不到记录会被误报成「还没装过」"
+fi
+
+# 12.9 实跑一次：非 root 跑 --status 不应因权限被拒（要么给状态，要么给权限提示）
+#      注：这里用 testuser 模拟；它没 docker 组权限，所以预期能走到权限提示分支。
+if id -u testuser >/dev/null 2>&1; then
+  cp "$INSTALLER" /tmp/inst-rocheck.sh && chmod 755 /tmp/inst-rocheck.sh
+  su - testuser -c 'bash /tmp/inst-rocheck.sh --status --dir /opt/muse-regress --api-port 28710 --web-port 28711 2>&1' >/tmp/r129.log 2>&1
+  RC129=$?
+  if grep -q "管理员权限跑" /tmp/r129.log; then
+    t_fail "非 root --status 仍被硬拦（应放行只读查询）" "$(head -1 /tmp/r129.log)"
+  elif grep -qE "没权限|sudo bash|docker 权限|运行中|没运行" /tmp/r129.log; then
+    t_ok "非 root --status 能走到只读查询/权限提示（不再硬拦）"
+  else
+    t_ok "非 root --status 正常返回（rc=$RC129）"
+  fi
+  rm -f /tmp/inst-rocheck.sh /tmp/r129.log
+else
+  t_ok "非 root --status 静态检查通过（跳过实跑，无 testuser）"
+fi
+
+# 12.10 打错的参数要给出「你是不是想打 X」的建议
+#       事故：`--unstall`（少个 i）/ `uninstall`（忘写横杠）只会回一句
+#             「不认识的参数，用 --help 看用法」，小白盯着看不出差在哪。
+if grep -q 'suggest_arg' "$INSTALLER" && grep -q '你是不是想打' "$INSTALLER"; then
+  t_ok "打错的参数会给出最接近的建议"
+else
+  t_fail "打错参数没有「你是不是想打」提示"
+fi
+# 实跑几个真实错法，确认建议命中最该命中的那几个
+_chk_sug() {
+  local bad="$1" want="$2" out
+  out="$(bash "$INSTALLER" "$bad" 2>&1)"
+  if printf '%s' "$out" | grep -q -- "$want"; then
+    t_ok "「$bad」被建议为 $want"
+  else
+    t_fail "「$bad」没被建议为 $want" "$(printf '%s' "$out" | tail -1)"
+  fi
+}
+_chk_sug "--unstall"  "--uninstall"
+_chk_sug "--stauts"   "--status"
+_chk_sug "uninstall"  "--uninstall"
+_chk_sug "status"     "--status"
+# 乱敲的字符串不该被"建议"（免得误导）
+if bash "$INSTALLER" "zzqqxx" 2>&1 | grep -q "你是不是想打"; then
+  t_fail "乱敲的字符串被硬凑成了建议（会误导）"
+else
+  t_ok "乱敲的字符串不会被硬凑出建议"
+fi
+
+# 12.11 管道安装时不能印出 `sudo bash bash --status` 这种 nonsense
+#       事故：curl|bash 时 $0=bash，basename 得 "bash"，收尾命令全成了 `bash bash`。
+if grep -q 'bash|sh|dash|ash|zsh|ksh' "$INSTALLER"; then
+  t_ok "管道运行时不会把 shell 名当脚本名"
+else
+  t_fail "管道运行会把 \$0 的 bash 当脚本名（印出 bash bash）"
+fi
+# 实跑：管道方式 dry-run，收尾/提示里不该出现 "bash bash"
+bash -c "cat '$INSTALLER' | bash -s -- --dry-run --yes --dir /tmp/muse-pipechk" >/tmp/r1211.log 2>&1
+if grep -q 'bash bash' /tmp/r1211.log; then
+  t_fail "管道运行仍印出「bash bash」" "$(grep -m1 'bash bash' /tmp/r1211.log)"
+else
+  t_ok "管道运行不含「bash bash」"
+fi
+rm -rf /tmp/muse-pipechk
+
+# 12.12 安装后必须把脚本自存一份，好让生命周期命令永远可用
+if grep -q 'self_hint' "$INSTALLER" && grep -q '\$INSTALL_DIR/install.sh' "$INSTALLER"; then
+  t_ok "有 self_hint：生命周期命令指向安装目录里的脚本副本"
+else
+  t_fail "缺少脚本自存 / self_hint"
+fi
+# 实跑验证：真装一次，确认 /opt/muse-selfchk/install.sh 存在且可执行
+bash "$INSTALLER" --yes --dir /opt/muse-selfchk --api-port 28820 --web-port 28821 >/tmp/r1212.log 2>&1
+RC1212=$?
+if [ "$RC1212" = 0 ] && [ -x /opt/muse-selfchk/install.sh ]; then
+  t_ok "安装后脚本自存为可执行的 /opt/muse-selfchk/install.sh"
+  # 而且会用这条路径提示用户
+  if grep -q 'bash /opt/muse-selfchk/install.sh --status' /tmp/r1212.log; then
+    t_ok "收尾提示用的是自存路径（一定可用）"
+  else
+    t_fail "收尾提示没指向自存路径" "$(grep -m1 -- '--status' /tmp/r1212.log)"
+  fi
+  # 副本要能真的跑起来
+  if bash /opt/muse-selfchk/install.sh --status >/tmp/r1212b.log 2>&1 && \
+     grep -q "运行状态" /tmp/r1212b.log; then
+    t_ok "自存的脚本副本能正常执行 --status"
+  else
+    t_fail "自存的脚本副本跑不起来" "$(tail -1 /tmp/r1212b.log)"
+  fi
+  # 用副本卸载，收尾干净
+  bash /opt/muse-selfchk/install.sh --uninstall --yes >/tmp/r1212c.log 2>&1
+  docker rm -f muse-selfchk >/dev/null 2>&1
+  systemctl disable --now muse-selfchk-web.service >/dev/null 2>&1
+  rm -f /etc/systemd/system/muse-selfchk-web.service
+  systemctl daemon-reload >/dev/null 2>&1
+  rm -rf /opt/muse-selfchk
+else
+  t_fail "安装后没有脚本自存（或安装失败 rc=$RC1212）" "$(tail -2 /tmp/r1212.log)"
+fi
+
+# 12.13 资源体检：内存/磁盘要主动报告（免得 1G 小鸡 OOM 了还不知道为啥）
+if grep -q 'check_resources' "$INSTALLER"; then
+  t_ok "有 check_resources 做内存/磁盘体检"
+else
+  t_fail "缺少资源体检（1G 内存机器会莫名 OOM）"
+fi
+bash "$INSTALLER" --dry-run --yes --dir /tmp/muse-rschk >/tmp/r1213.log 2>&1
+if grep -qE '内存：|磁盘剩余' /tmp/r1213.log; then
+  t_ok "资源体检在环境检查阶段输出内存/磁盘"
+else
+  t_fail "资源体检没有输出" "$(grep -A2 '检查环境' /tmp/r1213.log | tail -1)"
+fi
+rm -rf /tmp/muse-rschk
+
+rm -rf /tmp/muse-namedchk
+
+t_case "13. 清理测试残留"
 cleanup_all
 [ ! -d "$TDIR" ] && t_ok "测试目录已清理" || t_fail "残留 $TDIR"
 

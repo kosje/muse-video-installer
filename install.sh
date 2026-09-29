@@ -19,8 +19,40 @@ set -uo pipefail
 
 # 脚本自身的名字 —— 提示里一律用它，这样不管用户下载后叫 install.sh、
 # setup.sh 还是别的，复制粘贴出来的命令都是对的。
-SELF="$(basename "$0")"
-[ -n "$SELF" ] || SELF="install.sh"
+#
+# ⚠️ 但**管道运行**时必须特判（实测踩过）：
+#    `curl ... | bash` / `cat install.sh | bash` 时 $0 是解释器名（bash / sh），
+#    basename 得到 "bash" —— 于是收尾里会印出
+#        sudo bash bash --status
+#    这种 nonsense，小白照抄必报错。这正是「一条命令安装」最常见的用法。
+#    判定：$0 是常见 shell 名 → 认为是从管道/标准输入来的，改用固定名 install.sh。
+SELF="$(basename "${0:-}")"
+# 记住「脚本文件在哪」。管道运行时这里为空 —— 后面安装流程会**把脚本自己
+# 抄一份进安装目录**，让 --status/--upgrade 这些生命周期命令永远有个可执行的副本，
+# 不再依赖「用户当初把脚本下到哪了」。这一步是小白最需要的兜底：
+# 他很可能装完就把脚本删了 / 换成手机看，回头想升级时两手空空。
+SELF_PATH=""
+case "$0" in
+  /*|./*|../*|[A-Za-z]:[\\/]*) [ -f "$0" ] && SELF_PATH="$0" ;;
+esac
+case "$SELF" in
+  bash|sh|dash|ash|zsh|ksh|"") SELF="install.sh"; SELF_PATH="" ;;
+esac
+
+# ── 自我定位「我是从哪个安装目录跑起来的」──────────────────────────────
+#
+# 我们把脚本副本存进安装目录（见 save_state），就是为了让用户随时能
+# `bash /opt/xxx/install.sh --status`。但副本里的 DEFAULT_DIR 还是 /opt/mvw ——
+# 装到别的目录时副本会认不出自己是谁（实测：跑副本报「还没装过 /opt/mvw」）。
+# 解法：脚本启动时看看自己躺在哪里 —— 如果**旁边就有 install.conf**，
+# 说明「我就在某个安装目录里」，那就把那个目录当作默认安装目录。
+INSTALL_DIR_SELF=""
+if [ -n "$SELF_PATH" ] && [ -f "$SELF_PATH" ]; then
+  _self_dir="$(cd "$(dirname "$SELF_PATH")" 2>/dev/null && pwd)"
+  if [ -n "$_self_dir" ] && [ -f "$_self_dir/install.conf" ]; then
+    INSTALL_DIR_SELF="$_self_dir"
+  fi
+fi
 
 SCRIPT_VERSION="1.0.0"
 # 前缀统一用 mvw-（Muse Video Workbench），避免和用户已有的 muse-video / muse2api
@@ -67,7 +99,7 @@ DO_STATUS=0
 DO_UNINSTALL=0
 DO_UPGRADE=0
 DO_HELP=0
-INSTALL_DIR="$DEFAULT_DIR"
+INSTALL_DIR="${INSTALL_DIR_SELF:-$DEFAULT_DIR}"
 API_PORT=""
 WEB_PORT=""
 DOMAIN=""
@@ -107,6 +139,74 @@ ${APP_LABEL} 一键安装脚本 v${SCRIPT_VERSION}
 EOF
 }
 
+# ── 「你是不是想打……」：给打错的参数一个最接近的建议 ────────────────
+#
+# ⚠️ 为什么值得单写一个函数（真人实测）：
+#    小白打错 --uninstall 的概率极高，而最常见的错法是**少一个字母**
+#    （--unstall / --uninstal）—— 光看两行字他根本发现不了差在哪。
+#    更常见的是**不带你以为的横杠**：直接敲 `uninstall` / `status`。
+#    这时只回一句「不认识的参数，用 --help 看用法」，等于把人晾在原地。
+#    下面用最朴素的「编辑距离」找最近的合法选项，明确告诉他打哪个。
+_levdist() {
+  # 极简 Levenshtein 距离（纯 bash，字符串都很短，性能无所谓）
+  local a="$1" b="$2" i j
+  local la=${#a} lb=${#b}
+  local prev cur
+  local -a row
+  for ((j = 0; j <= lb; j++)); do row[j]=$j; done
+  for ((i = 1; i <= la; i++)); do
+    prev=${row[0]}; row[0]=$i
+    for ((j = 1; j <= lb; j++)); do
+      cur=${row[j]}
+      if [ "${a:i-1:1}" = "${b:j-1:1}" ]; then
+        row[j]=$prev
+      else
+        local m=$prev
+        [ "${row[j]}" -lt "$m" ] && m=${row[j]}
+        [ "${row[j-1]}" -lt "$m" ] && m=${row[j-1]}
+        row[j]=$((m + 1))
+      fi
+      prev=$cur
+    done
+  done
+  printf '%s' "${row[lb]}"
+}
+
+suggest_arg() {
+  local bad="$1"
+  # 归一化：去掉前导横杠，转小写 —— 这样 `uninstall`/`-Uninstall` 都能对上
+  local key="${bad#--}"; key="${key#-}"
+  local had_dash=0
+  case "$bad" in -*) had_dash=1 ;; esac
+  key="$(printf '%s' "$key" | tr '[:upper:]' '[:lower:]')"
+  local best="" bestd=99 cand d
+  for cand in yes dry-run no-deps status uninstall upgrade help dir api-port web-port domain no-domain; do
+    d="$(_levdist "$key" "$cand")"
+    if [ "$d" -lt "$bestd" ]; then bestd=$d; best=$cand; fi
+  done
+  # 冒号后面这段是「完全对上、但没写横杠」的情况 —— **小白最常犯的错**：
+  # 直接把 `uninstall` / `status` 当子命令敲。这时距离是 0，必须也给出建议，
+  # 否则最该帮的那一类人反而得不到提示。
+  if [ "$bestd" = 0 ] && [ "$had_dash" = 0 ] && [ -n "$best" ]; then
+    printf '%s' "--$best"; return 0
+  fi
+  # 距离阈值：宁可多猜一次，也别让小白卡住 —— 这个提示只是**建议**，
+  # 猜错了顶多浪费一眼；猜对了就省掉他反复试错。实测常见错法：
+  #   unstall→uninstall(2) / stauts→status(2,字母调位) / updat→upgrade(4,缩写)
+  # 但也不能太松，否则乱敲个 `xyz` 都会被"建议"成 --yes。规则：
+  #   · 太短（<=4 字符）→ 只容忍 2，够抓 stauts/updat 这类，
+  #     又不至于把 `xyz`(→yes,3) 硬凑上；
+  #   · 中等（5-7）→ 容忍 4；
+  #   · 长词（>=8）→ 容忍 5。
+  local lim=4
+  if [ "${#key}" -le 4 ]; then lim=2
+  elif [ "${#key}" -ge 8 ]; then lim=5
+  fi
+  if [ -n "$best" ] && [ "$bestd" -le "$lim" ] && [ "$bestd" -gt 0 ]; then
+    printf '%s' "--$best"
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --yes|-y)        ASSUME_YES=1 ;;
@@ -125,7 +225,15 @@ while [ $# -gt 0 ]; do
     --domain)        DOMAIN="${2:-}"; shift; [ -n "${DOMAIN:-}" ] || die "--domain 后面要跟一个域名（比如 --domain video.example.com）"; ADV_GIVEN=1 ;;
     --domain=*)      DOMAIN="${1#*=}"; [ -n "$DOMAIN" ] || die "--domain= 后面要跟一个域名"; ADV_GIVEN=1 ;;
     --no-domain)     NO_DOMAIN=1; ADV_GIVEN=1 ;;
-    *)               die "不认识的参数：$1（用 --help 看用法）" ;;
+    *)
+      # 打错的参数：先猜一个最像的，明确告诉他该敲哪个；猜不到再退回看帮助。
+      _sug="$(suggest_arg "$1")"
+      if [ -n "$_sug" ]; then
+        die "不认识的参数：$1
+       你是不是想打：$_sug ？
+       全部用法：bash ${SELF} --help"
+      fi
+      die "不认识的参数：$1（用 --help 看用法）" ;;
   esac
   shift
 done
@@ -587,6 +695,29 @@ INSTALLED_AT=$(date +%s)
 SCRIPT_VERSION=$SCRIPT_VERSION
 EOF
   chmod 600 "$STATE_FILE" 2>/dev/null || true
+
+  # 顺手把**脚本自己**存一份进安装目录（覆盖式，永远是最新版）。
+  # 为什么必须做（实测）：小白多半是用「一条命令」装的（curl | bash），
+  # 机器上根本没有脚本文件；装完想升级/卸载时他就懵了 —— 因为他手上
+  # 既没有 install.sh，也不知道该从哪再弄一个。存一份在这儿之后，
+  # 收尾提示就能给他一条**永远可用**的命令：
+  #     sudo bash /opt/mvw/install.sh --status
+  if [ -n "$SELF_PATH" ] && [ -f "$SELF_PATH" ]; then
+    cp -f "$SELF_PATH" "$INSTALL_DIR/install.sh" 2>/dev/null && \
+      chmod 755 "$INSTALL_DIR/install.sh" 2>/dev/null || true
+  fi
+}
+
+# 生命周期命令（--status/--upgrade/--uninstall）该用哪条命令来提示？
+# 优先用「安装目录里那份脚本副本」—— 哪怕用户当初是管道装的、或者把
+# 下载的脚本删了，这条路也一定通。目录里还没有副本（首次安装中途）时，
+# 退回脚本自身的名字。
+self_hint() {
+  if [ -n "${INSTALL_DIR:-}" ] && [ -f "$INSTALL_DIR/install.sh" ]; then
+    printf 'bash %s/install.sh' "$INSTALL_DIR"
+  else
+    printf 'bash %s' "$SELF"
+  fi
 }
 
 # 从已有安装里读出 API Key —— 优先状态文件，其次 compose 文件（兼容旧版本安装）。
@@ -622,8 +753,63 @@ need_state() {
        想安装的话跑：sudo bash ${SELF}"
   fi
   if [ ! -f "$STATE_FILE" ]; then
+    # ⚠️ 目录在、记录读不到，有两种可能，别混为一谈：
+    #    a) 文件真的不存在（上次装到一半中断）→ 让他重跑安装
+    #    b) 文件存在但**当前用户没权限读**（目录是 root 0700）→ 别叫他"重装"，
+    #       而是要他用 sudo。实测：普通用户跑 --status 会走到这里，
+    #       若只按 a 处理，会对着一个装好的服务说"还没装过"，纯耽误事。
+    if [ ! -e "$STATE_FILE" ] && [ ! -r "$INSTALL_DIR" ]; then
+      die "看不到安装记录（目录 $INSTALL_DIR 需要管理员权限才能读）。
+       加上 sudo 再试：sudo bash ${SELF} --status"
+    fi
     die "目录 $INSTALL_DIR 在，但没有安装记录 —— 多半是上次装到一半中断了。
        直接重跑一次安装就能接上：sudo bash ${SELF}"
+  fi
+}
+
+# ── 资源体检：内存 / 磁盘 ─────────────────────────────────────────────
+#
+# 这套栈的容器里跑 Chromium（shm 2G），最现实的失败是 **OOM**：
+# 1G 内存的小鸡在「点生成」那一刻容器被内核杀掉，docker logs 只有一句
+# "Killed"，小白完全看不出原因，只会觉得「这软件坏了」。
+# 所以装之前先量一下内存，太小就**明说**（给数字、给出路），
+# 但不硬拦 —— 2G 也能跑，只是偶尔卡；决定权留给用户。
+check_resources() {
+  # 内存（kB）→ 换算 GB 时用整数近似，够用了
+  local mem_kb=0 mem_gb=0
+  if [ -r /proc/meminfo ]; then
+    mem_kb="$(awk '/^MemTotal:/{print $2}' /proc/meminfo 2>/dev/null)"
+  fi
+  case "$mem_kb" in ''|*[!0-9]*) mem_kb=0 ;; esac
+  if [ "$mem_kb" -gt 0 ]; then
+    mem_gb=$(( mem_kb / 1024 / 1024 ))
+    if [ "$mem_gb" -ge 4 ]; then
+      ok "内存：约 ${mem_gb} GB（够用）"
+    elif [ "$mem_gb" -ge 2 ]; then
+      ok "内存：约 ${mem_gb} GB（够用；同时跑别的服务时可能有点紧）"
+    elif [ "$mem_gb" -ge 1 ]; then
+      warn "内存只有约 ${mem_gb} GB —— 这套工具要跑无头浏览器，1G 容易在生成视频时被系统杀掉。"
+      warn "   现象是「点了生成，然后任务莫名失败」，日志里只有 Killed。"
+      warn "   建议升级到 2 核 4G，或先加一块 swap（临时顶一下）："
+      warn "     sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile"
+      warn "   继续装也可以，只是别指望它稳定出片。"
+    else
+      warn "读不到内存大小（/proc/meminfo 不可读），跳过内存检查。"
+    fi
+  fi
+
+  # 磁盘：本体 + 浏览器镜像加起来大约 2GB，留 3GB 才舒服
+  local avail_kb=0
+  avail_kb="$(df -Pk "${INSTALL_DIR%/*}" 2>/dev/null | awk 'NR==2{print $4}')"
+  case "$avail_kb" in ''|*[!0-9]*) avail_kb=0 ;; esac
+  if [ "$avail_kb" -gt 0 ]; then
+    local avail_gb=$(( avail_kb / 1024 / 1024 ))
+    if [ "$avail_gb" -lt 3 ]; then
+      warn "磁盘剩余约 ${avail_gb} GB —— 这套工具连镜像加数据要 2GB 出头，可能会装到一半写满。"
+      warn "   清一清旧文件，或者换个盘：df -h"
+    else
+      ok "磁盘剩余：约 ${avail_gb} GB"
+    fi
   fi
 }
 
@@ -735,10 +921,22 @@ fetch_muse2api() {
   # 兜底：下载 zip
   local url="https://codeload.github.com/${MUSE2API_REPO}/zip/refs/heads/main"
   run mkdir -p "$dir"
-  if runsh "curl -fsSL --max-time 300 '$url' -o /tmp/muse2api.zip"; then
-    runsh "cd '$dir' && (command -v unzip >/dev/null 2>&1 && unzip -q -o /tmp/muse2api.zip || python3 -c \"import zipfile,sys;zipfile.ZipFile('/tmp/muse2api.zip').extractall('.')\") && mv muse2api-main/* . 2>/dev/null; rm -f /tmp/muse2api.zip"
+  # ⚠️ zip 的临时文件不能写死 /tmp/muse2api.zip：
+  #    两台安装同时跑、或上一次失败留了残file，都会互相踩（比如复用了别人下坏的半截包）。
+  #    用 mktemp 生成唯一名，并在结束时一定清掉。
+  local ztmp
+  ztmp="$(mktemp /tmp/muse2api-XXXXXX.zip 2>/dev/null || echo "/tmp/muse2api-$$.zip")"
+  if runsh "curl -fsSL --max-time 300 '$url' -o '$ztmp'"; then
+    # 解包 → 把顶层目录里的内容（含隐藏文件）挪到 $dir，再删掉那个空壳目录。
+    # 早期写法 `mv muse2api-main/* .` 有两个毛病：
+    #   1) 漏掉隐藏文件（.env.example / .gitignore），装完缺文件；
+    #   2) 不删 muse2api-main 空目录，$dir 里留个垃圾壳。
+    runsh "cd '$dir' && (command -v unzip >/dev/null 2>&1 && unzip -q -o '$ztmp' || python3 -c \"import zipfile;zipfile.ZipFile('$ztmp').extractall('.')\") \
+&& (shopt -s dotglob nullglob 2>/dev/null; mv muse2api-main/* . 2>/dev/null; rm -rf muse2api-main) \
+&& rm -f '$ztmp'"
     ok "下载完成（压缩包方式）"
   else
+    rm -f "$ztmp"
     die "下载程序本体失败。请检查这台机器的网络能否访问 github.com。
        国内机器可以先配好代理，或手动把代码放到 $dir 再重跑本脚本。"
   fi
@@ -1271,9 +1469,14 @@ print_next_steps() {
   fi
   say ""
   say "  常用命令："
-  say "    sudo bash ${SELF} --status      看运行状态（也能把上面的地址和 Key 再打印一遍）"
-  say "    sudo bash ${SELF} --upgrade     升级到最新版"
-  say "    sudo bash ${SELF} --uninstall   卸载"
+  # 用 self_hint：脚本自己已经存了一份到安装目录，这里给出**一定可用**的命令。
+  # （管道安装时用户手上没有脚本文件，写 ${SELF} 他会找不到。）
+  say "    sudo $(self_hint) --status      看运行状态（也能把上面的地址和 Key 再打印一遍）"
+  say "    sudo $(self_hint) --upgrade     升级到最新版"
+  say "    sudo $(self_hint) --uninstall   卸载"
+  if [ -n "$SELF_PATH" ] && [ "$SELF_PATH" != "$INSTALL_DIR/install.sh" ]; then
+    say "    ${C_DIM}（脚本已另存一份到 $INSTALL_DIR/install.sh，你原来的那份可以删）${C_OFF}"
+  fi
   say ""
   say "  ${C_DIM}记不住 API Key？随时跑 --status 就能看回来。${C_OFF}"
   say ""
@@ -1283,6 +1486,7 @@ print_next_steps() {
   dim "    □ 网页 http://${IP}:${WEB_PORT}/ 能打开（左侧能看到「生成视频」按钮）"
   dim "    □ 右上角状态灯是绿的（说明 Key 对、接口通）"
   dim "    □ 账号池里有 1 个账号（http://${IP}:${API_PORT}/admin?key=${API_KEY}）"
+  dim "      ↑ 现在还是 0 个，做完上面第 ② 步（导号）才会变成 1"
   dim "    □ 填一句描述点生成，1-2 分钟内出片"
   say ""
 }
@@ -1337,6 +1541,11 @@ do_install() {
   step "开始检查环境"
   detect_os
   [ -n "$PKG" ] && ok "系统：$OS_ID $OS_VER（用 $PKG 装东西）" || warn "认不出这个系统的包管理器，可能需要手工装依赖"
+  # 资源体检：内存太小是这套栈最**隐蔽**的失败源。
+  # 容器里跑着 Chromium（shm 2G），1G 内存的小鸡会在出片那一刻被 OOM 杀掉，
+  # 日志里只留一句 Killed —— 小白根本看不出是内存不够。
+  # 提前说清楚，比事后让他对着 "Killed" 发懵强得多。
+  check_resources
 
   # 安装目录能否创建/写入 —— 提前拦住，别等下载完几百 MB 才失败
   check_install_dir_writable
@@ -1435,7 +1644,11 @@ do_install() {
   step "启动服务"
   if [ "$DRY_RUN" = 1 ]; then
     printf '    %s[dry-run]%s cd %s && docker compose -p %s up -d --build\n' "$C_CYN" "$C_OFF" "$INSTALL_DIR" "$CONTAINER_NAME"
-    printf '    %s[dry-run]%s systemctl enable --now %s-web.service\n' "$C_CYN" "$C_OFF" "$APP_NAME"
+    # ⚠️ 这里必须用 "$WEB_UNIT"（含派生名），**不能**写死 "$APP_NAME-web.service"。
+    #    unit 名是按安装目录派生的（见 derive_names），写死的话 dry-run 会显示一个
+    #    根本不存在的服务名 —— 比如装到 /opt/mvtest 时实际是 mvtest-web.service，
+    #    却打印 mvw-web.service。小白拿这个去 systemctl 查会扑空。
+    printf '    %s[dry-run]%s systemctl enable --now %s\n' "$C_CYN" "$C_OFF" "$WEB_UNIT"
   else
     local out rc
     out="$(cd "$INSTALL_DIR" && compose up -d --build 2>&1)"; rc=$?
@@ -1443,7 +1656,7 @@ do_install() {
       printf '%s\n' "$out" | tail -8 | sed 's/^/    /'
       case "$out" in
         *"is already in use"*)  die "容器名被占用了 —— 可能这台机器上已经装过一次。
-       先看看：docker ps -a | grep muse2api
+       先看看：docker ps -a | grep '${CONTAINER_NAME}'
        或者卸载重装：sudo bash ${SELF} --uninstall" ;;
         *"address already in use"*|*"port is already allocated"*)
           die "端口被占用了，换个端口重跑：sudo bash ${SELF} --api-port <另一个端口>" ;;
@@ -1553,6 +1766,11 @@ strip_managed_block() {
 
 # ── --status ─────────────────────────────────────────────────────────
 do_status() {
+  # ⚠️ --status 是**只读**操作，不需要管理员权限。
+  #    早期版本在 main 里对 --status 也调了 check_root，结果普通用户
+  #    （或 docker 组用户）想看「服务在跑吗？我的网址和 Key 是什么？」
+  #    会被一句「请用管理员权限运行」挡回去 —— 对小白来说是纯粹的惊吓，
+  #    他并没有要改任何东西。现在放行，只在**真的**读不到时给温和提示。
   load_state || need_state
   say ""
   printf '%s%s 运行状态%s\n\n' "$C_BLD" "$APP_LABEL" "$C_OFF"
@@ -1572,7 +1790,15 @@ do_status() {
       else
         warn "接口自检：没响应（看日志：docker logs "$CONTAINER_NAME" --tail 40）"
       fi ;;
-    missing) err "接口服务：没找到容器" ;;
+    missing)
+      # docker 权限不足时 inspect 也返回空，会落到这里 —— 和「真没容器」长得一样。
+      # 区分一下：不是 root、也没有 docker 组权限 → 明确说是权限问题，别误导。
+      if [ "$(id -u)" != 0 ] && ! docker ps >/dev/null 2>&1; then
+        warn "看不到容器状态（当前用户没有 docker 权限）"
+        say "    换个身份再看：sudo bash ${SELF} --status"
+      else
+        err "接口服务：没找到容器"
+      fi ;;
     *)       err "接口服务：$st" ;;
   esac
   if systemctl is-active "${WEB_UNIT}" >/dev/null 2>&1; then
@@ -1628,7 +1854,21 @@ do_uninstall() {
   load_state || need_state
   say ""
   warn "准备卸载 $APP_LABEL（目录：$INSTALL_DIR）"
-  if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
+  # ⚠️ 卸载是**破坏性**操作，非交互环境下**绝不能默默继续**。
+  #
+  #    早期版本写的是 `[ "$ASSUME_YES" != 1 ] && [ -t 0 ]` 才问确认 ——
+  #    也就是说在非交互环境（管道、`< /dev/null`、CI、从网页复制的命令串）里
+  #    会**跳过确认直接卸载**。实测复现：`bash install.sh --uninstall < /dev/null`
+  #    一行就把容器删了，小白如果误粘贴这么一条，服务当场就没了。
+  #
+  #    正确做法：非交互时要求用户**显式**给 --yes 才动手，否则拒绝并告诉他怎么做。
+  if [ "$ASSUME_YES" != 1 ]; then
+    if [ ! -t 0 ]; then
+      die "当前不是交互终端，出于安全我没有直接卸载。
+       确认要卸载的话，请显式加上 --yes：
+           sudo bash ${SELF} --uninstall --yes
+       （不加 --yes 时，请在自己电脑的终端里跑，脚本会问你「确定吗」）"
+    fi
     if ! ask_yn "确定要卸载吗？" n; then say "  已取消。"; return 0; fi
   fi
   step "停止并删除容器"
@@ -1649,6 +1889,10 @@ do_uninstall() {
   run systemctl daemon-reload
 
   local del_dir=n
+  # 非交互时**默认保留**数据（del_dir=n），只删服务不删账号 —— 这是保守的安全默认。
+  # 要连数据一起删，只有交互确认（或手动 rm -rf）这一条路。
+  # 注：这里不再额外打印说明 —— 下面分支的「数据保留在 …」已经把结果讲清楚了，
+  #     多说一句反而啰嗦、还会和它重复。
   if [ "$ASSUME_YES" != 1 ] && [ -t 0 ]; then
     say ""
     say "  账号和生成过的视频都放在 $INSTALL_DIR 里。"
@@ -1674,8 +1918,24 @@ do_upgrade() {
     printf '    %s[dry-run]%s git pull && docker compose -p %s up -d --build\n' "$C_CYN" "$C_OFF" "$CONTAINER_NAME"
     return 0
   fi
-  local old_id
-  old_id="$(docker inspect "$CONTAINER_NAME" --format '{{.Image}}' 2>/dev/null || echo '')"
+  # 回滚用的「旧镜像」必须先**打固定 tag 保住**，不能只记 ID。
+  #
+  #   ⚠️ 为什么：`docker inspect X --format {{.Image}}` 拿到的是容器创建时的镜像 ID
+  #   （形如 sha256:ec3c...）。而下面 `compose up --build` 会用**同一个 tag**
+  #   （X:latest）重建，旧镜像被顶掉、变成 dangling 层，接着就可能被回收。
+  #   实测：拿那个 sha256 去 `docker run` 直接报 "No such image" ——
+  #   也就是**原来的回滚根本没生效**（错误还被 `|| true` 吞了，只打印「已尝试回滚」骗人）。
+  #   正解：先把当前镜像另存一个固定 tag，回滚时用这个 tag，就一定还在。
+  local old_tag=""
+  if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+    old_tag="${CONTAINER_NAME}:rollback"
+    if docker tag "$CONTAINER_NAME:latest" "$old_tag" >/dev/null 2>&1; then
+      : # 保住了
+    else
+      # 容器在但 :latest 不在（少见），退而用它的镜像 ID
+      old_tag="$(docker inspect "$CONTAINER_NAME" --format '{{.Image}}' 2>/dev/null || echo '')"
+    fi
+  fi
   if [ -d "$INSTALL_DIR/.git" ]; then
     (cd "$INSTALL_DIR" && git pull --ff-only 2>&1 | tail -3) || warn "git pull 没成功，仍尝试用现有代码重建"
   else
@@ -1686,11 +1946,48 @@ do_upgrade() {
       ok "升级完成，服务正常"
     else
       err "新版本启动异常，正在回滚"
-      if [ -n "$old_id" ]; then
+      # ⚠️ 回滚**必须补齐和正常 compose 一样的关键参数**，不能只映射端口。
+      #
+      #    早期版本这里是：
+      #        docker run -d --name X --restart always -p PORT:PORT "$old_id"
+      #    后果：回滚出来的容器等于一个「半残」实例 ——
+      #      · 没有 -v data 挂载 → 账号/任务数据全看不见（像被清空）
+      #      · 没有 MUSE2API_KEY   → 鉴权密钥变了，所有客户端连同导号工具一并失联
+      #      · 没有 --shm-size     → 无头浏览器渲染多标签页时可能崩
+      #      · 没有 command 覆盖   → 自定义端口时应用还在听 18610
+      #    也就是说：升级失败后「回滚」反而把服务搞得更坏，小白会以为数据丢了。
+      #    下面每一项都照 write_compose 对齐。
+      if [ -n "$old_tag" ]; then
+        local rkey; rkey="$(read_existing_key)"
         docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
-        docker run -d --name "$CONTAINER_NAME" --restart always \
-          -p "${API_PORT}:${API_PORT}" "$old_id" >/dev/null 2>&1 || true
-        warn "已尝试回滚到旧版本，请用 --status 复查"
+        # 校验回滚镜像确实存在；不存在就别假装成功
+        if ! docker image inspect "$old_tag" >/dev/null 2>&1; then
+          err "回滚镜像 $old_tag 已不存在，无法自动回滚。"
+          warn "服务当前是停的。重跑一次安装即可恢复到可用状态：sudo bash ${SELF}"
+          return 1
+        fi
+        if docker run -d --name "$CONTAINER_NAME" --restart always \
+          -p "${API_PORT}:${API_PORT}" \
+          -v "$INSTALL_DIR/data:/app/data" \
+          --shm-size 2g \
+          -e "MUSE2API_KEY=${rkey}" \
+          -e "MUSE2API_HOST=0.0.0.0" \
+          -e "MUSE2API_PORT=${API_PORT}" \
+          -e "MUSE2API_PUBLIC_BASE=" \
+          -e "MUSE2API_CHROMIUM=/usr/bin/chromium" \
+          -e "MUSE2API_CDP_PORT=19210" \
+          -e "MUSE2API_IMAGE_TIMEOUT=240" \
+          -e "MUSE2API_VIDEO_TIMEOUT=600" \
+          -e "MUSE2API_CHAT_TIMEOUT=300" \
+          "$old_tag" sh -c "python -m uvicorn app:app --host 0.0.0.0 --port ${API_PORT}" \
+          >/dev/null 2>&1; then
+          warn "已回滚到升级前的版本（数据卷 / 密钥 / 浏览器参数都已带上），请用 --status 复查"
+        else
+          err "回滚也没起来。请把下面这条的输出发出来求助："
+          say "      docker logs ${CONTAINER_NAME} --tail 50"
+        fi
+      else
+        warn "没有可用的旧镜像，无法自动回滚。服务当前可能不可用，重跑安装可恢复。"
       fi
       return 1
     fi
@@ -1705,7 +2002,7 @@ main() {
   detect_os
   derive_names
 
-  if [ "$DO_STATUS" = 1 ]; then     check_root "$@"; do_status; exit $?; fi
+  if [ "$DO_STATUS" = 1 ]; then     do_status; exit $?; fi
   if [ "$DO_UNINSTALL" = 1 ]; then  check_root "$@"; do_uninstall; exit $?; fi
   if [ "$DO_UPGRADE" = 1 ]; then    check_root "$@"; do_upgrade; exit $?; fi
 
