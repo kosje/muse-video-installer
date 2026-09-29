@@ -1,5 +1,8 @@
 # Muse 视频工作台 · 一键安装
 
+[![Release](https://img.shields.io/github/v/release/yys9253462-gif/muse-video-installer?label=%E6%9C%80%E6%96%B0%E7%89%88)](https://github.com/yys9253462-gif/muse-video-installer/releases/latest)
+[![License](https://img.shields.io/github/license/yys9253462-gif/muse-video-installer)](LICENSE)
+
 > 在**你自己的服务器**上，一条命令装好一个「输入文字就能生成视频」的网页工具。
 > 装完后：浏览器打开网址 → 写一句话 → 出视频。还能让别的软件（Cherry Studio、NextChat 等）连上它调用接口。
 
@@ -56,6 +59,10 @@ sudo bash install.sh
 > 3. 装了 `git` 的话：`git clone https://github.com/yys9253462-gif/muse-video-installer.git`
 >
 > ⚠️ 装完**别删** `install.sh`，以后 `--status` / `--upgrade` / `--uninstall` 都要用它。
+
+> 💡 想装**固定版本**（而不是随时可能变动的最新版）？
+> 去 [Releases 页面](https://github.com/yys9253462-gif/muse-video-installer/releases/latest) 下载 `muse-video-installer-<版本>.tar.gz`，
+> 传到服务器上 `tar -xzf` 解压，再 `sudo bash install.sh`。解压出来的包里连导号工具一起都有。
 
 想**全自动、不问任何问题**：
 
