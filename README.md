@@ -125,28 +125,99 @@ API Key：       m2a_xxxxxxxxxxxxxxxxxxxx
 ### 第 2 步：导入你的 muse.ai 账号（⚠️ 必须做）
 
 视频工作台是靠 **muse.ai 的账号**来出片的，所以得先给它一个账号。
-你的服务器上**没有浏览器**，所以这一步要在**你自己的电脑**上做：
+你的服务器上**没有浏览器**，所以这一步要在**你自己的电脑**上做。
 
-**a)** 下载导号小工具（在你自己电脑上，Windows 装了 Chrome 就能跑）：
+好消息：**整个过程只需要敲一条命令**，剩下的它都会问你。
+
+---
+
+#### 准备：确认电脑上有 Python 和浏览器（各看一次就行）
+
+**Python**：打开命令行敲 `python --version`，能显示版本号（如 `Python 3.12.1`）就跳过。
+没装的话去 [python.org](https://www.python.org/downloads/) 下载，安装时**务必勾选
+"Add Python to PATH"**（这一步漏了后面会报「不是内部或外部命令」）。
+
+**浏览器**：Windows 自带的 **Edge** 就行，有 **Chrome** 更好。不用额外装。
+
+---
+
+#### 第 1 步：下载导号小工具
+
+下载这个文件，**存到桌面**（文件名叫 `get_muse_cookie.py`，别改）：
 
 ```
-https://github.com/czg86389-hub/muse2api/raw/main/tools/get_muse_cookie.py
+https://raw.githubusercontent.com/yys9253462-gif/muse-video-installer/main/tools/get_muse_cookie.py
 ```
 
-**b)** 在同一个文件夹里打开命令行（Windows 按 `Win+R` 输入 `cmd` 回车，然后 `cd` 到那个文件夹），跑：
+> 它是一个普通的 Python 脚本，你可以用记事本打开看内容，**不会**在你电脑上装任何东西。
+
+---
+
+#### 第 2 步：敲一条命令
+
+在桌面打开命令行：Windows `Win+R` → 输入 `cmd` → 回车，然后：
 
 ```bash
-python get_muse_cookie.py --base http://你的服务器IP:18610 --key 你的Key
+cd Desktop
+python get_muse_cookie.py
 ```
 
-> 没装 Python？去 [python.org](https://www.python.org/downloads/) 下载安装，
-> 安装时记得勾选 **"Add Python to PATH"**。
+它会问你两件事（直接从下面的输出里复制过去）：
 
-**c)** 会弹出一个浏览器窗口 → 在里面登录你的 muse.ai 账号。
-登录完脚本会**自动把账号传上服务器**，看到「导入成功」就好了。
+| 它问什么 | 你填什么 |
+|---|---|
+| 服务器地址 | `你的服务器IP:18610` |
+| API Key | 安装结束时显示的 `m2a_` 开头那串（随时可以用 `sudo bash install.sh --status` 查回来） |
 
-**d)** 去账号池面板确认一下：`http://你的服务器IP:18610/admin?key=你的Key`
-里面应该有 **1 个账号**。
+填完它会**自动弹出一个浏览器窗口**。
+
+> 💡 地址和 Key 它会**记住**。第二次起，直接连敲两个回车就行。
+
+---
+
+#### 第 3 步：在弹出的窗口里登录 muse.ai
+
+用你平时的方式登录即可。**登录成功、能看到聊天界面后**，脚本会自己把账号传上服务器，
+你会看到：
+
+```
+  ✓ 导入成功！
+      账号标签：你的邮箱
+      账号 ID： 160c1f16435f
+      cookie： 10 条
+```
+
+然后它会问你「**还要再导入一个 muse.ai 账号吗？**」
+
+- 只加一个 → 直接回车
+- **想加多个** → 按 `y`，会弹出一个干净的浏览器窗口，登录**另一个** muse.ai 账号即可。
+  想加几个就加几个，一路 `y` 下去，加完回车收工。
+
+最后它会打印账号池的现状，方便你核对。
+
+---
+
+#### 第 4 步：核对
+
+```bash
+sudo bash install.sh --status
+```
+
+看到「账号池： **N** 个账号」就对上了。也可以打开面板看：
+`http://你的服务器IP:18610/admin?key=你的Key`
+
+---
+
+#### 常见卡点
+
+| 现象 | 怎么办 |
+|---|---|
+| `python 不是内部或外部命令` | Python 装了但没勾 "Add to PATH"。重装一次并勾上，或把 Python 的安装目录手动加到 PATH |
+| 「没找到可用的浏览器」 | 装个 Chrome（<https://www.google.cn/chrome/>），或者用 `--chrome "D:\某处\chrome.exe"` 指定路径 |
+| 「连不上服务器」 | ① 地址漏了冒号（要写 `1.2.3.4:18610`）② 云服务商的**安全组**没放行 18610 端口 |
+| 「API Key 不对」 | Key 复制少了字符。跑 `sudo bash install.sh --status` 看回来重新复制 |
+| 等待登录超时 | 重跑一次，这次登录快一点；或者加 `--timeout 600` 给足 10 分钟 |
+| 完全不想装浏览器 | `python get_muse_cookie.py --from-clipboard`，按提示从浏览器 F12 里复制 4 条 cookie |
 
 ### 第 3 步：回到网页，测试生成
 
@@ -192,6 +263,22 @@ sudo bash install.sh --help        # 看全部用法
 
 所以"想改点东西再装一遍"是安全的。
 
+### 加账号 / 看账号池（在你自己的电脑上跑）
+
+导号小工具除了导号，还能直接管账号池，不用打开网页：
+
+```bash
+python get_muse_cookie.py                    # 导一个；它会问「还要再来一个吗」
+python get_muse_cookie.py --count 3          # 一口气导 3 个（全自动，不问）
+python get_muse_cookie.py --list             # 看账号池现在有哪些账号
+python get_muse_cookie.py --remove acc-02    # 删掉某个账号（按 ID 或标签）
+```
+
+> 不记得地址和 Key 也没关系 —— 敲 `python get_muse_cookie.py` 它会问你，
+> 而且**记住上次填的**，第二次起连敲两个回车就行。
+>
+> 忘了 Key：在服务器上跑 `sudo bash install.sh --status` 就能看回来。
+
 ### 直接管容器（进阶）
 
 ```bash
@@ -202,7 +289,7 @@ cd /opt/mvw && docker compose logs -f
 cd /opt/mvw && docker compose restart
 
 # 看网页服务日志
-journalctl -u muse-video-web.service -f
+journalctl -u mvw-web.service -f
 ```
 
 ---
@@ -280,6 +367,12 @@ http://你的服务器IP:18610/admin?key=你的Key
 
 账号数量是 `0` → 重跑[第 2 步](#第-2-步导入你的-museai-账号-必须做)导号。
 有账号但报错 → 重新导一次（账号会过期，脚本会每 48 小时自动续期，但偶尔会失效）。
+
+想确认账号还在不在，不用开网页：
+
+```bash
+python get_muse_cookie.py --list
+```
 
 ### ❌ 安装时报「端口已被占用」
 
