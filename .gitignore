@@ -1,0 +1,10 @@
+# 安装后产生的运行数据，不要提交
+data/
+install.conf
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+.DS_Store
