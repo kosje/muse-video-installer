@@ -43,17 +43,19 @@
 SSH 登录到你的服务器，然后：
 
 ```bash
-# 1. 下载安装脚本（<你的仓库地址> 发布后会自动替换成真实链接）
-curl -fsSL -o install.sh https://raw.githubusercontent.com/<你的GitHub账号>/muse-video-installer/main/install.sh
+# 1. 下载安装脚本
+curl -fsSL -o install.sh https://raw.githubusercontent.com/yys9253462-gif/muse-video-installer/main/install.sh
 
 # 2. 跑起来（会问你 1-2 个问题）
 sudo bash install.sh
 ```
 
-> 📌 **拿不到脚本？** 三种办法任选：
+> 📌 **脚本下载不下来？** 三种办法任选：
 > 1. 用 `scp` 把 `install.sh` 传到服务器：`scp install.sh root@你的服务器IP:/root/`
-> 2. 或者直接把脚本内容复制粘贴到服务器上新建的文件里
-> 3. 装完脚本后**别删**，以后 `--status` / `--upgrade` / `--uninstall` 都要用它
+> 2. 在浏览器里打开上面的链接，复制全部内容，在服务器上新建文件粘贴进去
+> 3. 装了 `git` 的话：`git clone https://github.com/yys9253462-gif/muse-video-installer.git`
+>
+> ⚠️ 装完**别删** `install.sh`，以后 `--status` / `--upgrade` / `--uninstall` 都要用它。
 
 想**全自动、不问任何问题**：
 

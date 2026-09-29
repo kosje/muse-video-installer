@@ -6,16 +6,21 @@
 #    · 在浏览器里打开一个网页，输入一句话就生成视频
 #    · 让别的软件（Cherry Studio、NextChat 等）连上它调用接口
 #
-#  用法：
-#    交互安装：   sudo bash install-muse-video.sh
-#    全自动安装： sudo bash install-muse-video.sh --yes
-#    看会做什么： sudo bash install-muse-video.sh --dry-run
-#    其他：       sudo bash install-muse-video.sh --status | --uninstall | --help
+#  用法（下面统一写作 install.sh，实际就是你下载时的文件名）：
+#    交互安装：   sudo bash install.sh
+#    全自动安装： sudo bash install.sh --yes
+#    看会做什么： sudo bash install.sh --dry-run
+#    其他：       sudo bash install.sh --status | --uninstall | --help
 #
 #  支持 Debian/Ubuntu（apt）、CentOS/RHEL（yum/dnf）、Alpine（apk）
 # ============================================================================
 
 set -uo pipefail
+
+# 脚本自身的名字 —— 提示里一律用它，这样不管用户下载后叫 install.sh、
+# setup.sh 还是别的，复制粘贴出来的命令都是对的。
+SELF="$(basename "$0")"
+[ -n "$SELF" ] || SELF="install.sh"
 
 SCRIPT_VERSION="1.0.0"
 APP_NAME="muse-video"
@@ -70,12 +75,12 @@ usage() {
   cat <<EOF
 ${APP_LABEL} 一键安装脚本 v${SCRIPT_VERSION}
 
-用法：sudo bash install-muse-video.sh [选项]
+用法：sudo bash ${SELF} [选项]
 
 常用：
   --yes, -y            全自动安装，所有问题用默认值（适合脚本/CI）
   --dry-run            只显示会做什么，不实际改动系统
-  --status             看当前运行状态
+  --status             看当前运行状态（也能找回地址和 API Key）
   --upgrade            升级到最新版
   --uninstall          卸载
   --help, -h           显示本帮助
@@ -89,9 +94,9 @@ ${APP_LABEL} 一键安装脚本 v${SCRIPT_VERSION}
   --no-deps            不自动安装依赖，缺什么只告诉你
 
 示例：
-  sudo bash install-muse-video.sh
-  sudo bash install-muse-video.sh --yes --web-port 8090
-  sudo bash install-muse-video.sh --domain video.example.com
+  sudo bash ${SELF}
+  sudo bash ${SELF} --yes --web-port 8090
+  sudo bash ${SELF} --domain video.example.com
 EOF
 }
 
@@ -149,7 +154,7 @@ for _v in status uninstall upgrade; do
 done
 if [ "$_SUB_CNT" -gt 1 ]; then
   die "这几个参数一次只能给一个：$_SUB_LIST。
-       你想干什么就留哪个，比如只看状态：sudo bash $0 --status"
+       你想干什么就留哪个，比如只看状态：sudo bash ${SELF} --status"
 fi
 unset _SUB_CNT _SUB_LIST _cur _v
 
@@ -233,7 +238,7 @@ check_root() {
   if [ "$IS_ROOT" != 1 ]; then
     if command -v sudo >/dev/null 2>&1; then
       die "这个脚本要用管理员权限跑。请这样运行：
-       sudo bash $0 $*"
+       sudo bash ${SELF} $*"
     fi
     die "这个脚本要用管理员权限跑，但这台机器上没有 sudo。
        请先切换到 root 再运行（执行：su -  然后重新跑本脚本）"
@@ -352,7 +357,7 @@ check_install_dir_writable() {
     return 0
   fi
   die "创建不了目录 $INSTALL_DIR —— 它的上级 $probe 没有写权限。
-       换个位置：sudo bash $0 --dir /你的/可写/路径"
+       换个位置：sudo bash ${SELF} --dir /你的/可写/路径"
 }
 
 # ── 依赖自动安装 ──────────────────────────────────────────────────────
@@ -535,11 +540,11 @@ read_existing_key() {
 need_state() {
   if [ ! -d "$INSTALL_DIR" ]; then
     die "这台机器上还没有装过 $APP_LABEL（找不到目录 $INSTALL_DIR）。
-       想安装的话跑：sudo bash $0"
+       想安装的话跑：sudo bash ${SELF}"
   fi
   if [ ! -f "$STATE_FILE" ]; then
     die "目录 $INSTALL_DIR 在，但没有安装记录 —— 多半是上次装到一半中断了。
-       直接重跑一次安装就能接上：sudo bash $0"
+       直接重跑一次安装就能接上：sudo bash ${SELF}"
   fi
 }
 
@@ -1147,9 +1152,9 @@ print_next_steps() {
   say "  账号池面板：    http://${IP}:${API_PORT}/admin?key=${API_KEY}"
   say ""
   say "  常用命令："
-  say "    sudo bash $0 --status      看运行状态（也能把上面的地址和 Key 再打印一遍）"
-  say "    sudo bash $0 --upgrade     升级到最新版"
-  say "    sudo bash $0 --uninstall   卸载"
+  say "    sudo bash ${SELF} --status      看运行状态（也能把上面的地址和 Key 再打印一遍）"
+  say "    sudo bash ${SELF} --upgrade     升级到最新版"
+  say "    sudo bash ${SELF} --uninstall   卸载"
   say ""
   say "  ${C_DIM}记不住 API Key？随时跑 --status 就能看回来。${C_OFF}"
   say ""
@@ -1287,9 +1292,9 @@ do_install() {
       case "$out" in
         *"is already in use"*)  die "容器名被占用了 —— 可能这台机器上已经装过一次。
        先看看：docker ps -a | grep muse2api
-       或者卸载重装：sudo bash $0 --uninstall" ;;
+       或者卸载重装：sudo bash ${SELF} --uninstall" ;;
         *"address already in use"*|*"port is already allocated"*)
-          die "端口被占用了，换个端口重跑：sudo bash $0 --api-port <另一个端口>" ;;
+          die "端口被占用了，换个端口重跑：sudo bash ${SELF} --api-port <另一个端口>" ;;
         *) die "启动失败（上面是原始输出）。可以看日志：cd $INSTALL_DIR && docker compose logs --tail=40" ;;
       esac
     fi
