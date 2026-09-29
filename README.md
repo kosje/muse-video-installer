@@ -127,9 +127,21 @@ API Key：       m2a_xxxxxxxxxxxxxxxxxxxx
 视频工作台是靠 **muse.ai 的账号**来出片的，所以得先给它一个账号。
 你的服务器上**没有浏览器**，所以这一步要在**你自己的电脑**上做。
 
-好消息：**整个过程只需要敲一条命令**，剩下的它都会问你。
+给你两条路，**任选其一**：
+
+| | 方式 | 适合谁 | 要装什么 |
+|---|---|---|---|
+| **🅰** | 导号小工具（推荐） | 想省事的 | Python |
+| **🅱** | 网页手动粘贴 | 不想装任何东西的 | 无 |
+
+> 💡 **装了 Python 就选 🅰** —— 敲一条命令，剩下的它全问你。
+> **没 Python / 不想装** 就选 🅱，代价是要自己从浏览器里抄 4 串字符。
 
 ---
+
+## 🅰 导号小工具（推荐）
+
+整个流程**只需要敲一条命令**，剩下的它都会问你。
 
 #### 准备：确认电脑上有 Python 和浏览器（各看一次就行）
 
@@ -138,8 +150,6 @@ API Key：       m2a_xxxxxxxxxxxxxxxxxxxx
 "Add Python to PATH"**（这一步漏了后面会报「不是内部或外部命令」）。
 
 **浏览器**：Windows 自带的 **Edge** 就行，有 **Chrome** 更好。不用额外装。
-
----
 
 #### 第 1 步：下载导号小工具
 
@@ -217,7 +227,60 @@ sudo bash install.sh --status
 | 「连不上服务器」 | ① 地址漏了冒号（要写 `1.2.3.4:18610`）② 云服务商的**安全组**没放行 18610 端口 |
 | 「API Key 不对」 | Key 复制少了字符。跑 `sudo bash install.sh --status` 看回来重新复制 |
 | 等待登录超时 | 重跑一次，这次登录快一点；或者加 `--timeout 600` 给足 10 分钟 |
-| 完全不想装浏览器 | `python get_muse_cookie.py --from-clipboard`，按提示从浏览器 F12 里复制 4 条 cookie |
+| 浏览器起不来（提示「你自己日常用的浏览器正在运行」） | Chrome 系浏览器不允许同时开两个带调试端口的实例。把你的浏览器**完全退出**再重跑；或者改用 Edge：`--chrome "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"` |
+| 完全不想装浏览器/Python | 用下面的 🅱 方案 |
+
+---
+
+## 🅱 网页手动粘贴（不装任何东西）
+
+服务端的面板**自带导入框**，不想装 Python 就用这条路。
+
+#### 第 1 步：从浏览器里把 4 串 cookie 抄出来
+
+1. 在你自己的浏览器里**登录 muse.ai**（要先登录成功）
+2. 按 `F12` 打开开发者工具 → 切到 **Application**（中文版叫「应用」）标签页
+3. 左侧找到 **Cookies** → 点开 `https://muse.ai`
+4. 在右侧列表里依次找到这 **4 个名字**，双击它的 **Value** 列复制：
+
+```
+hatch_sess
+hatch_gw
+hatch_vml
+hatch_native_auth_device
+```
+
+> ⚠️ 这 4 个的值都很长（几十到几百字符），**要完整复制**，少一个字符就不行。
+> 它们都标着 `HttpOnly ✓` —— 这正是为什么不能直接在控制台敲
+> `document.cookie` 读它们，必须到 Application 面板里看。
+
+#### 第 2 步：拼成一行，粘进面板
+
+把这 4 个值拼成**一行**（分号 + 空格分隔）：
+
+```
+hatch_sess=你复制的值; hatch_gw=你复制的值; hatch_vml=你复制的值; hatch_native_auth_device=你复制的值
+```
+
+然后打开面板 → 点「**添加账号**」→ 把上面那行粘进输入框 → 保存：
+
+```
+http://你的服务器IP:18610/admin?key=你的Key
+```
+
+#### 想一次加多个？
+
+面板支持批量，**每行一个账号**，行首可以带标签：
+
+```
+acc-01 | hatch_sess=...; hatch_gw=...; hatch_vml=...; hatch_native_auth_device=...
+acc-02 | hatch_sess=...; hatch_gw=...; hatch_vml=...; hatch_native_auth_device=...
+```
+
+> 💡 如果你装了 Python，用 🅰 的 `--from-clipboard` 也行 ——
+> 它读的就是上面这种格式，你不用自己拼接。
+
+---
 
 ### 第 3 步：回到网页，测试生成
 
