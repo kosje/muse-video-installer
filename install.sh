@@ -58,7 +58,7 @@ if [ -n "$SELF_PATH" ] && [ -f "$SELF_PATH" ]; then
   fi
 fi
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.1.0"
 # 前缀统一用 mvw-（Muse Video Workbench），避免和用户已有的 muse-video / muse2api
 # 等同名服务撞车 —— 曾因默认名与既有服务的 unit 重名，把别人的服务覆盖掉。
 APP_NAME="mvw"
@@ -66,7 +66,13 @@ APP_LABEL="Muse 视频工作台"
 DEFAULT_DIR="/opt/mvw"
 DEFAULT_API_PORT=18610
 DEFAULT_WEB_PORT=8090
-MUSE2API_REPO="czg86389-hub/muse2api"
+# 装哪一份 muse2api？
+#   指向自己的 fork —— 它基于上游 v1.5.2，并叠加了 11 项缺陷修复
+#   （FIFO 队列调度 / CDP 单读循环 / 参数校验 / 405 鉴权绕过等）。
+#   ⚠️ 上游原仓库 czg86389-hub/muse2api 当前**不含**这些修复，
+#   因此这里不能用上游地址，否则装出来的版本会缺修复。
+#   待上游合并 PR（czg86389-hub/muse2api#4）后，可考虑切回上游。
+MUSE2API_REPO="yys9253462-gif/muse2api"
 # 本脚本自己所在的仓库 —— 导号小工具托管在这里，别指向上游
 # （上游的 tools/get_muse_cookie.py 是原版，不能多账号、也没有连通自检）。
 SELF_REPO="yys9253462-gif/muse-video-installer"
