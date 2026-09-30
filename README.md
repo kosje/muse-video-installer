@@ -657,7 +657,18 @@ python3 tools/test-import-tool.py --base http://你的IP:18610 --key m2a_xxx
   并叠加了 11 项稳定性与安全修复（并发调度、参数校验、鉴权加固等）。
   上游合并 [PR #5](https://github.com/czg86389-hub/muse2api/pull/5) 后可切回上游。
 - 本安装脚本：把部署、导号、网页工作台串成一条命令，面向不懂 Linux 的用户
-- 安装脚本版本：`1.1.0`
+- 安装脚本版本：`1.1.1`
+
+### 装完会自检代码（v1.1.1 新增）
+
+脚本固定安装 `main` 分支（`MUSE2API_REF="main"`），装完会**在容器里**核对三项关键修复：
+FIFO 队列调度（`scheduler.py`）、405 鉴权守卫（`_guard_method_not_allowed`）、
+视频时长校验（`validate_video_duration`）。三项都在才打印「代码自检：关键修复都在」；
+任一缺失会明确报错，而不是假装安装成功。随时可复查：
+
+```bash
+sudo bash install.sh --status   # 会顺带跑一次代码自检
+```
 
 ### 文件说明
 

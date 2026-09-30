@@ -58,7 +58,7 @@ if [ -n "$SELF_PATH" ] && [ -f "$SELF_PATH" ]; then
   fi
 fi
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.1.1"
 # 前缀统一用 mvw-（Muse Video Workbench），避免和用户已有的 muse-video / muse2api
 # 等同名服务撞车 —— 曾因默认名与既有服务的 unit 重名，把别人的服务覆盖掉。
 APP_NAME="mvw"
@@ -71,8 +71,15 @@ DEFAULT_WEB_PORT=8090
 #   （FIFO 队列调度 / CDP 单读循环 / 参数校验 / 405 鉴权绕过等）。
 #   ⚠️ 上游原仓库 czg86389-hub/muse2api 当前**不含**这些修复，
 #   因此这里不能用上游地址，否则装出来的版本会缺修复。
-#   待上游合并 PR（czg86389-hub/muse2api#4）后，可考虑切回上游。
+#   待上游合并 PR（czg86389-hub/muse2api#5）后，可考虑切回上游。
 MUSE2API_REPO="yys9253462-gif/muse2api"
+# 装仓库里的哪个分支/标签。
+# ⚠️ 必须显式写死，不能让 git 用「默认分支」——这是个踩过的坑：
+#   `git clone --depth 1 <url>` 不加 -b 时**只拉默认分支**。曾经修复代码放在
+#   其它分支、默认分支还是旧版，脚本却提示「安装成功」，用户装完才发现功能是坏的，
+#   排查了很久。显式 -b 让「装哪一版」变成脚本里看得见的一行，而不是仓库设置里的隐藏状态。
+#   同时下游还有 verify_installed_fixes() 自检兜底，双保险。
+MUSE2API_REF="main"
 # 本脚本自己所在的仓库 —— 导号小工具托管在这里，别指向上游
 # （上游的 tools/get_muse_cookie.py 是原版，不能多账号、也没有连通自检）。
 SELF_REPO="yys9253462-gif/muse-video-installer"
@@ -922,14 +929,16 @@ fetch_muse2api() {
   fi
   step "下载程序本体"
   if command -v git >/dev/null 2>&1; then
-    if runsh "git clone --depth 1 https://github.com/${MUSE2API_REPO}.git '$dir' 2>&1 | tail -3"; then
+    # -b "$MUSE2API_REF" 不能省：不加时 git 只拉默认分支，若修复不在默认分支上就会
+    # 静默装到没有修复的旧代码（曾经的线上事故根因）。
+    if runsh "git clone --depth 1 -b '$MUSE2API_REF' https://github.com/${MUSE2API_REPO}.git '$dir' 2>&1 | tail -3"; then
       ok "下载完成"
       return 0
     fi
     warn "git 下载失败，改试压缩包"
   fi
   # 兜底：下载 zip
-  local url="https://codeload.github.com/${MUSE2API_REPO}/zip/refs/heads/main"
+  local url="https://codeload.github.com/${MUSE2API_REPO}/zip/refs/heads/${MUSE2API_REF}"
   run mkdir -p "$dir"
   # ⚠️ zip 的临时文件不能写死 /tmp/muse2api.zip：
   #    两台安装同时跑、或上一次失败留了残file，都会互相踩（比如复用了别人下坏的半截包）。
@@ -941,9 +950,17 @@ fetch_muse2api() {
     # 早期写法 `mv muse2api-main/* .` 有两个毛病：
     #   1) 漏掉隐藏文件（.env.example / .gitignore），装完缺文件；
     #   2) 不删 muse2api-main 空目录，$dir 里留个垃圾壳。
-    runsh "cd '$dir' && (command -v unzip >/dev/null 2>&1 && unzip -q -o '$ztmp' || python3 -c \"import zipfile;zipfile.ZipFile('$ztmp').extractall('.')\") \
-&& (shopt -s dotglob nullglob 2>/dev/null; mv muse2api-main/* . 2>/dev/null; rm -rf muse2api-main) \
-&& rm -f '$ztmp'"
+    # ⚠️ 顶层目录名不是写死的 "muse2api-main"：GitHub 打包规则是 <repo>-<ref>，
+    #    ref 换成别的时候（如 master / v1.5.2）名字就变了，写死会 mv 不到而留下空目录。
+    #    所以这里先探出真实目录名再挪 —— 兼容任意分支/标签。
+    runsh "cd '$dir' && (command -v unzip >/dev/null 2>&1 && unzip -q -o '$ztmp' || python3 -c \"import zipfile;zipfile.ZipFile('$ztmp').extractall('.')\")"
+    local top
+    top="$(cd "$dir" && find . -maxdepth 1 -mindepth 1 -type d -name '*-*' | head -1 | sed 's|^\./||')"
+    if [ -z "$top" ]; then
+      rm -f "$ztmp"
+      die "压缩包解出来找不到顶层目录，可能下载不完整。请重跑本脚本。"
+    fi
+    runsh "cd '$dir' && (shopt -s dotglob nullglob 2>/dev/null; mv '$top'/* . 2>/dev/null; rm -rf '$top') && rm -f '$ztmp'"
     ok "下载完成（压缩包方式）"
   else
     rm -f "$ztmp"
@@ -1416,6 +1433,70 @@ api_alive() {
   case "$code" in ''|000) return 1 ;; *) return 0 ;; esac
 }
 
+# 解析「真正在跑的那个容器名」。
+# 为什么不能直接用 $CONTAINER_NAME：容器名是**安装时**写进 compose 的，
+# 而手工改过 compose、或用更早的脚本装过、或有人 docker rename 过，都会让它对不上。
+# 这时如果死认 $CONTAINER_NAME，--status 会报「× 没找到容器」——明明服务好好地跑着，
+# 用户看到只会恐慌（曾经我自己就被这个误导过：容器叫 muse2api，脚本找 mvw）。
+# 策略：先用 $CONTAINER_NAME；找不到就退而按「镜像名 / 服务标签」反查一个 muse 容器。
+resolve_container_name() {
+  if docker inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+    printf '%s' "$CONTAINER_NAME"; return 0
+  fi
+  # 反查：优先本项目的 compose 标签，其次镜像名以 muse2api/mvw 开头
+  local c
+  c="$(docker ps -a \
+        --filter "label=com.docker.compose.service=muse2api" \
+        --format '{{.Names}}' 2>/dev/null | head -1)"
+  if [ -z "$c" ]; then
+    c="$(docker ps -a --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
+          | awk -F'\t' '$2 ~ /^(muse2api|mvw|muse-video)/ {print $1; exit}')"
+  fi
+  printf '%s' "$c"
+}
+
+# 装完自检代码级修复是否真的在。
+# ⚠️ 为什么需要这个：脚本装的是「仓库的某个 ref」，但 ref 里到底有没有修复，
+#    光看「容器起来了 / 接口有响应」是看不出来的 —— 旧版代码同样能起来、同样有响应。
+#    曾经的事故就是：默认分支还是旧版，脚本报「安装成功」，用户用了几轮才发现
+#    并发一上来就卡死（旧版用裸锁，第二个请求会永久自锁）。
+#    所以这里做三项硬校验，任一不过就**明确报警**（而不是假装成功）：
+#      ① scheduler.py 存在       → FIFO 队列调度在
+#      ② app.py 有鉴权守卫函数    → 405 绕过修复在
+#      ③ app.py 有时长校验函数    → 参数校验修复在
+#    在容器里查（而不是宿主目录），保证查的就是真正跑起来的那份代码。
+verify_installed_fixes() {
+  local c
+  c="$(resolve_container_name)"
+  if [ -z "$c" ]; then
+    err "自检跳过：找不到对应的容器（服务没起来？用 docker ps -a 看一眼）"
+    return 1
+  fi
+
+  local missing=""
+
+  if ! docker exec "$c" test -f /app/scheduler.py 2>/dev/null; then
+    missing="${missing} scheduler.py"
+  fi
+  if ! docker exec "$c" sh -c \
+      'grep -q "_guard_method_not_allowed" /app/app.py' 2>/dev/null; then
+    missing="${missing} 鉴权守卫"
+  fi
+  if ! docker exec "$c" sh -c \
+      'grep -q "validate_video_duration" /app/app.py' 2>/dev/null; then
+    missing="${missing} 时长校验"
+  fi
+
+  if [ -n "$missing" ]; then
+    err "自检没过：装到的代码缺少关键修复 ——${missing}"
+    say "     这说明下载到的版本不对（多半是分支选错了或仓库被改动）。"
+    say "     请删除 ${INSTALL_DIR} 后重跑本脚本；若仍失败，把它反馈给维护者。"
+    return 1
+  fi
+  ok "代码自检：关键修复都在（队列调度 / 鉴权守卫 / 时长校验）"
+  return 0
+}
+
 wait_api_ready() {
   local tries=0
   while [ "$tries" -lt 40 ]; do
@@ -1686,6 +1767,8 @@ do_install() {
     step "等待服务就绪（初次启动要装浏览器，可能 1-2 分钟）"
     if wait_api_ready; then
       ok "接口服务正常"
+      # 接口有响应 ≠ 代码是带修复的版本 —— 再查一遍代码级修复。
+      verify_installed_fixes || true
     else
       warn "接口服务等了好久还没就绪，看看日志："
       docker logs "$CONTAINER_NAME" 2>&1 | tail -10 | sed 's/^/    /'
@@ -1788,15 +1871,27 @@ do_status() {
     err "这台机器上没有 docker"; return 1
   fi
   local st
+  # 先解析出真正在跑的容器名（手工改过 compose / 老脚本装过时，$CONTAINER_NAME 会对不上）
+  local real_c
+  real_c="$(resolve_container_name)"
+  if [ -n "$real_c" ]; then
+    CONTAINER_NAME="$real_c"
+  fi
   # 容器不存在时 docker 会把错误写进 stderr，必须整段丢弃，
   # 否则报错文字会混进 st，让下面 case 匹配不上（表现为多余的换行+missing）
   st="$(docker inspect "$CONTAINER_NAME" --format '{{.State.Status}}' 2>/dev/null | head -1)"
   [ -n "$st" ] || st="missing"
   case "$st" in
     running)
-      ok "接口服务：运行中（端口 ${API_PORT}）"
+      if [ "$CONTAINER_NAME" != "$APP_NAME" ]; then
+        ok "接口服务：运行中（容器 ${CONTAINER_NAME}，端口 ${API_PORT}）"
+      else
+        ok "接口服务：运行中（端口 ${API_PORT}）"
+      fi
       if api_alive; then
         ok "接口自检：正常"
+        # 顺便复查代码级修复还在不在（用户随时可以跑 --status 确认版本没装错）
+        verify_installed_fixes || true
       else
         warn "接口自检：没响应（看日志：docker logs "$CONTAINER_NAME" --tail 40）"
       fi ;;
@@ -1808,6 +1903,8 @@ do_status() {
         say "    换个身份再看：sudo bash ${SELF} --status"
       else
         err "接口服务：没找到容器"
+        say "    如果你确定服务在跑，可能是容器名和预期不一致。看全部容器："
+        say "        docker ps -a"
       fi ;;
     *)       err "接口服务：$st" ;;
   esac
@@ -1954,6 +2051,8 @@ do_upgrade() {
   if (cd "$INSTALL_DIR" && compose up -d --build 2>&1 | tail -4); then
     if wait_api_ready; then
       ok "升级完成，服务正常"
+      # 升级后同样校验一次：新版代码该带的修复不能丢。
+      verify_installed_fixes || true
     else
       err "新版本启动异常，正在回滚"
       # ⚠️ 回滚**必须补齐和正常 compose 一样的关键参数**，不能只映射端口。
