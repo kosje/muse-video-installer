@@ -655,7 +655,7 @@ python3 tools/test-import-tool.py --base http://你的IP:18610 --key m2a_xxx
 - 程序本体：[yys9253462-gif/muse2api](https://github.com/yys9253462-gif/muse2api)
   —— 基于上游 [czg86389-hub/muse2api](https://github.com/czg86389-hub/muse2api)（MIT 协议），
   并叠加了 11 项稳定性与安全修复（并发调度、参数校验、鉴权加固等）。
-  上游合并 [PR #4](https://github.com/czg86389-hub/muse2api/pull/4) 后可切回上游。
+  上游合并 [PR #5](https://github.com/czg86389-hub/muse2api/pull/5) 后可切回上游。
 - 本安装脚本：把部署、导号、网页工作台串成一条命令，面向不懂 Linux 的用户
 - 安装脚本版本：`1.1.0`
 
