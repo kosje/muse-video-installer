@@ -13,6 +13,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - run: python3 -m unittest discover -s tests -v
+      - run: python3 tools/test-import-tool.py
+      - run: python3 tools/maintainer/make_release.py 2.0.0-security-preview
       - run: bash -n install.sh
       - name: Read-only preview
         run: |
