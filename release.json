@@ -1,5 +1,5 @@
 {
   "backend_repo": "kosje/muse2api",
-  "backend_commit": "4334ca11b94f34e111b2ce3300ed323a9a497678",
+  "backend_commit": "80e0df11174dba2d2dc302fa5d18b7020cff04a4",
   "caddy_image": "caddy:2-alpine@sha256:6aeddd44c3078b0f9a35206472a11420648a79c184603ef95957d0a20044cb2b"
 }
