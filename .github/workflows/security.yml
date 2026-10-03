@@ -1,0 +1,32 @@
+name: Secure deployment lifecycle
+on:
+  push:
+    branches: [security/private-deployment, main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: python3 -m unittest discover -s tests -v
+      - run: python3 tools/test-import-tool.py
+      - run: python3 tools/maintainer/make_release.py 2.0.0-security-preview
+      - run: bash -n install.sh
+      - name: Read-only preview
+        run: |
+          bash install.sh --dry-run
+          test ! -e /opt/mvw-secure
+      - name: Validate HTTPS configuration
+        run: |
+          python3 deploy/render.py render release.json /opt/mvw-ci 19610 video.example.com /tmp/mvw-render
+          docker compose -f /tmp/mvw-render/compose.yml config --quiet
+          image=$(python3 deploy/render.py get release.json caddy_image)
+          chmod 755 /tmp/mvw-render
+          chmod 644 /tmp/mvw-render/Caddyfile
+          docker run --rm -v /tmp/mvw-render/Caddyfile:/etc/caddy/Caddyfile:ro "$image" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+      - name: Disposable installation lifecycle
+        run: bash tests/lifecycle.sh

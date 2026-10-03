@@ -21,6 +21,7 @@ import os
 import sys
 import hashlib
 import tarfile
+import re
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # 本脚本在 publish/tools/maintainer/ → 仓库内容根就是上两级
@@ -39,6 +40,9 @@ FILES = {
     "LICENSE": False,
     "README.md": False,
     "install.sh": True,
+    "release.json": False,
+    "deploy/render.py": False,
+    "tests/test_deployment.py": False,
     "test-install.sh": True,
     "tools/get_muse_cookie.py": True,
     "tools/test-import-tool.py": True,
@@ -49,6 +53,8 @@ FIXED_MTIME = 1759100000  # 2025-09-29 附近，固定值即可
 
 
 def build(version: str) -> str:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", version):
+        raise ValueError("Invalid release version")
     top = f"muse-video-installer-{version}"
     out = os.path.join(OUT_DIR, f"{top}.tar.gz")
     os.makedirs(OUT_DIR, exist_ok=True)
@@ -79,7 +85,8 @@ def build(version: str) -> str:
     raw = io.BytesIO()
     with tarfile.open(fileobj=raw, mode="w") as tf:
         add(tf, top, b"", 0o755, isdir=True)
-        add(tf, f"{top}/tools", b"", 0o755, isdir=True)
+        for directory in ("tools", "deploy", "tests"):
+            add(tf, f"{top}/{directory}", b"", 0o755, isdir=True)
         for rel in sorted(FILES):
             path = os.path.join(SRC, rel)
             with open(path, "rb") as f:
